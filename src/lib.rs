@@ -69,8 +69,6 @@
 //!
 //! use `set_dt()` to change the integration-step of the simulation.
 
-#![allow(dead_code)]
-#![allow(unused_variables)]
 use ndarray::{self, Axis, Ix2, Order, Slice};
 use num_complex::Complex;
 use png;
@@ -124,10 +122,6 @@ impl GetBytes for u16 {
 /// * `stddev` - Standard deviation of the normal distribution.
 fn sample_normal(x: f64, mu: f64, stddev: f64) -> f64 {
     (-(((x - mu) * (x - mu)) / (2.0 * (stddev * stddev)))).exp()
-}
-
-fn sample_exponential(x: f64, exponent: f64, peak: f64) -> f64 {
-    peak * (-(x * exponent)).exp()
 }
 
 /// Euclidean distance between points `a` and `b`.
@@ -208,13 +202,14 @@ pub fn get_frame(
 /// * If the bit-depth of the png is less than 8.
 ///
 /// * If the png has a color type different from Grayscale, Grayscale with alpha, RGB or RGBA.
-pub fn load_from_png(file_path: &str) -> ndarray::Array2<f64> {
-    let decoder = png::Decoder::new(std::fs::File::open(file_path).unwrap());
-    let mut reader = decoder.read_info().unwrap();
+pub fn load_from_png(file_path: &str) -> Result<ndarray::Array2<f64>, Box<dyn std::error::Error>> {
+    let file = std::fs::File::open(file_path)?;
+    let decoder = png::Decoder::new(file);
+    let mut reader = decoder.read_info()?;
     let mut buf = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).unwrap();
+    let info = reader.next_frame(&mut buf)?;
     if info.bit_depth != png::BitDepth::Eight && info.bit_depth != png::BitDepth::Sixteen {
-        panic!("lenia_ca::load_from_png() - Unable to load from .png, as it has a bit depth of less than 8!");
+        return Err("Unable to load from .png, as it has a bit depth of less than 8!".into());
     }
     let output: ndarray::Array2<f64>;
     let offset: usize;
@@ -248,7 +243,7 @@ pub fn load_from_png(file_path: &str) -> ndarray::Array2<f64> {
             }
         }
         _ => {
-            panic!("lenia_ca::load_from_png() - Unsupported color type!");
+            return Err("Unsupported color type!".into());
         }
     }
     let shape = [info.width as usize, info.height as usize];
@@ -272,7 +267,7 @@ pub fn load_from_png(file_path: &str) -> ndarray::Array2<f64> {
                 * (1.0 / 255.0)
         });
     }
-    output
+    Ok(output)
 }
 
 /// Export a frame as a png or a bunch of png-s if multidimensional.

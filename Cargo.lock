@@ -1172,6 +1172,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
+name = "lenia_ca"
+version = "0.1.0"
+dependencies = [
+ "ggez",
+ "ndarray",
+ "num-complex",
+ "png",
+ "rand",
+ "rayon",
+ "rustfft",
+]
+
+[[package]]
 name = "lewton"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2008,19 +2021,6 @@ name = "renderdoc-sys"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "216080ab382b992234dda86873c18d4c48358f5cfcb70fd693d7f6f2131b628b"
-
-[[package]]
-name = "road_to_lenia"
-version = "0.1.0"
-dependencies = [
- "ggez",
- "ndarray",
- "num-complex",
- "png",
- "rand",
- "rayon",
- "rustfft",
-]
 
 [[package]]
 name = "rodio"

@@ -1,8 +1,5 @@
 //! Collection of generators for often used kernel shapes.
 
-#![allow(dead_code)]
-#![allow(unused_variables)]
-
 use crate::{euclidean_dist, growth_functions, sample_normal};
 use ndarray::IxDyn;
 
@@ -107,7 +104,7 @@ pub fn gaussian_donut_nd(radius: usize, dimensions: usize, stddev: f64) -> ndarr
     let center = vec![radius; dimensions];
     let mut shape: Vec<usize> = Vec::new();
     let mut index: Vec<f64> = Vec::new();
-    for i in 0..dimensions {
+    for _ in 0..dimensions {
         shape.push((radius * 2.0) as usize);
         index.push(0.0);
     }
@@ -154,7 +151,7 @@ pub fn multi_gaussian_donut_nd(
     let center = vec![radius; dimensions];
     let mut shape: Vec<usize> = Vec::new();
     let mut index: Vec<f64> = Vec::new();
-    for i in 0..dimensions {
+    for _ in 0..dimensions {
         shape.push((radius * 2.0) as usize);
         index.push(0.0);
     }
@@ -197,7 +194,7 @@ pub fn precalculated_linear(
     let center = vec![radius; dimensions];
     let mut shape: Vec<usize> = Vec::new();
     let mut index: Vec<f64> = Vec::new();
-    for i in 0..dimensions {
+    for _ in 0..dimensions {
         shape.push((radius * 2.0) as usize);
         index.push(0.0);
     }
@@ -231,7 +228,7 @@ pub fn polynomial_nd(radius: usize, dimensions: usize, params: &[f64]) -> ndarra
     let center = vec![radius; dimensions];
     let mut shape: Vec<usize> = Vec::new();
     let mut index: Vec<f64> = Vec::new();
-    for i in 0..dimensions {
+    for _ in 0..dimensions {
         shape.push((radius * 2.0) as usize);
         index.push(0.0);
     }
@@ -315,5 +312,5 @@ pub fn smoothlife(radius: usize, dimensions: usize, width_ratio: f64) -> ndarray
 /// Generates a kernel base of a single pixel with n-dimensions.
 pub fn pass(dimensions: usize) -> ndarray::ArrayD<f64> {
     let unit_shape: Vec<usize> = vec![1; dimensions];
-    ndarray::ArrayD::<f64>::from_shape_fn(unit_shape, |a| 1.0)
+    ndarray::ArrayD::<f64>::from_shape_fn(unit_shape, |_| 1.0)
 }

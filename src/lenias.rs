@@ -6,6 +6,13 @@ use num_complex::Complex;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
+// Default parameters for StandardLenia (Orbium unicaudatus)
+const DEFAULT_KERNEL_RADIUS: usize = 13;
+const DEFAULT_KERNEL_STDDEV: f64 = 1.0 / 6.7;
+const DEFAULT_GROWTH_MU: f64 = 0.15;
+const DEFAULT_GROWTH_SIGMA: f64 = 0.017;
+const DEFAULT_DT: f64 = 0.1;
+
 /// Standard type of Lenia
 ///
 /// `StandardLenia` struct implements the non-expanded Lenia system with a 2d field and
@@ -74,14 +81,17 @@ impl Lenia for StandardLenia {
                 panic!("StandardLenia::new() - Axis {} is extremely small ({} pixels). Make it larger!", i, *dim);
             }
         }
-        let kernel = Kernel::from(kernels::gaussian_donut_2d(13, 1.0 / 6.7), shape);
+        let kernel = Kernel::from(
+            kernels::gaussian_donut_2d(DEFAULT_KERNEL_RADIUS, DEFAULT_KERNEL_STDDEV),
+            shape,
+        );
 
         let conv_channel = ConvolutionChannel {
             input_channel: 0,
             kernel,
             field: ndarray::ArrayD::from_elem(shape, 0.0),
             growth: growth_functions::standard_lenia,
-            growth_params: vec![0.15, 0.017],
+            growth_params: vec![DEFAULT_GROWTH_MU, DEFAULT_GROWTH_SIGMA],
         };
 
         let channel = Channel {
@@ -93,7 +103,7 @@ impl Lenia for StandardLenia {
         StandardLenia {
             forward_fft_instance: fft::ParPlannedFFTND::new(shape, false),
             inverse_fft_instance: fft::ParPlannedFFTND::new(shape, true),
-            dt: 0.1,
+            dt: DEFAULT_DT,
             channel,
             shape: shape.to_vec(),
             conv_channel,
@@ -102,13 +112,12 @@ impl Lenia for StandardLenia {
     }
 
     fn iterate(&mut self) {
-        let field = self.channel.field.clone();
-        let params = self.conv_channel.growth_params.clone();
-        self.convolved.zip_mut_with(&field, |a, b| {
+        // Copy field data into convolved buffer for FFT
+        self.convolved.zip_mut_with(&self.channel.field, |a, b| {
             a.re = *b;
             a.im = 0.0;
         });
-        drop(field);
+
         self.forward_fft_instance.transform(&mut self.convolved);
 
         self.convolved
@@ -121,42 +130,47 @@ impl Lenia for StandardLenia {
 
         self.inverse_fft_instance.transform(&mut self.convolved);
 
+        // Apply growth function using parameters reference
+        let params = &self.conv_channel.growth_params;
+        let growth_fn = self.conv_channel.growth;
         for (a, b) in self
             .conv_channel
             .field
             .iter_mut()
             .zip(self.convolved.iter())
         {
-            *a = (&self.conv_channel.growth)(b.re, &params);
+            *a = growth_fn(b.re, params);
         }
 
+        // Update channel with integrated deltas
+        let dt = self.dt;
         for (a, b) in self
             .channel
             .field
             .iter_mut()
             .zip(self.conv_channel.field.iter())
         {
-            *a = (*a + (*b * self.dt)).clamp(0.0, 1.0);
+            *a = (*a + (*b * dt)).clamp(0.0, 1.0);
         }
     }
 
-    fn set_channels(&mut self, num_channels: usize) {
+    fn set_channels(&mut self, _num_channels: usize) {
         println!("Changing the number of channels is not available for Standard Lenia! Try using a different Lenia instead.");
     }
 
-    fn set_conv_channels(&mut self, num_conv_channels: usize) {
+    fn set_conv_channels(&mut self, _num_conv_channels: usize) {
         println!("Changing the number of channels is not available for Standard Lenia! Try using a different Lenia instead.");
     }
 
-    fn set_source_channel(&mut self, conv_channel: usize, src_channel: usize) {
+    fn set_source_channel(&mut self, _conv_channel: usize, _src_channel: usize) {
         println!("Adding or changing source channels is not available for Standard Lenia! Try using a different Lenia instead.");
     }
 
-    fn set_weights(&mut self, new_weights: &[f64], conv_channel: usize) {
+    fn set_weights(&mut self, _new_weights: &[f64], _conv_channel: usize) {
         println!("Adding or changing convolution output weights is not available for Standard Lenia! Try using a different Lenia instead.");
     }
 
-    fn set_kernel(&mut self, kernel: ndarray::ArrayD<f64>, conv_channel: usize) {
+    fn set_kernel(&mut self, kernel: ndarray::ArrayD<f64>, _conv_channel: usize) {
         self.conv_channel.kernel = Kernel::from(kernel, self.channel.field.shape());
     }
 
@@ -164,7 +178,7 @@ impl Lenia for StandardLenia {
         &mut self,
         f: fn(f64, &[f64]) -> f64,
         growth_params: Vec<f64>,
-        conv_channel: usize,
+        _conv_channel: usize,
     ) {
         self.conv_channel.growth = f;
         self.conv_channel.growth_params = growth_params;
@@ -178,27 +192,27 @@ impl Lenia for StandardLenia {
         &self.shape
     }
 
-    fn get_channel_as_ref(&self, channel: usize) -> &ndarray::ArrayD<f64> {
+    fn get_channel_as_ref(&self, _channel: usize) -> &ndarray::ArrayD<f64> {
         &self.channel.field
     }
 
-    fn get_kernel_as_ref(&self, conv_channel: usize) -> &Kernel {
+    fn get_kernel_as_ref(&self, _conv_channel: usize) -> &Kernel {
         &self.conv_channel.kernel
     }
 
-    fn get_channel_as_mut_ref(&mut self, channel: usize) -> &mut ndarray::ArrayD<f64> {
+    fn get_channel_as_mut_ref(&mut self, _channel: usize) -> &mut ndarray::ArrayD<f64> {
         &mut self.channel.field
     }
 
-    fn get_convoluted_as_ref(&self, conv_channel: usize) -> &ndarray::ArrayD<Complex<f64>> {
+    fn get_convoluted_as_ref(&self, _conv_channel: usize) -> &ndarray::ArrayD<Complex<f64>> {
         &self.convolved
     }
 
-    fn get_grown_as_ref(&self, conv_channel: usize) -> &ndarray::ArrayD<f64> {
+    fn get_grown_as_ref(&self, _conv_channel: usize) -> &ndarray::ArrayD<f64> {
         &self.conv_channel.field
     }
 
-    fn get_deltas_as_ref(&self, channel: usize) -> &ndarray::ArrayD<f64> {
+    fn get_deltas_as_ref(&self, _channel: usize) -> &ndarray::ArrayD<f64> {
         &self.conv_channel.field // Same as growth result because weights are not available for Standard Lenia
     }
 
@@ -214,7 +228,7 @@ impl Lenia for StandardLenia {
         1 as usize
     }
 
-    fn weights(&self, channel: usize) -> &[f64] {
+    fn weights(&self, _channel: usize) -> &[f64] {
         &self.channel.weights
     }
 }
@@ -376,10 +390,8 @@ impl Lenia for ExpandedLenia {
 
         for i in 0..conv_channel_mutexes.len() {
             // Set up and aquire locks on data
-            let axes_clone = axes.clone();
-            let inverse_axes_clone = inverse_axes.clone();
+
             let source_lock = Arc::clone(&channel_rwlocks[sources[i]]);
-            let delta_lock = Arc::clone(&delta_rwlocks[sources[i]]);
             let convolution_lock = Arc::clone(&convolution_mutexes[i]);
             let convolution_channel_lock = Arc::clone(&conv_channel_mutexes[i]);
             let forward_fft_lock = Arc::clone(&forward_fft_mutexes[i]);
@@ -388,7 +400,7 @@ impl Lenia for ExpandedLenia {
             convolution_handles.push(thread::spawn(move || {
                 let mut convolution_channel = convolution_channel_lock.lock().unwrap();
                 let input = source_lock.read().unwrap();
-                let delta = delta_lock.read().unwrap();
+
                 let mut convolution = convolution_lock.lock().unwrap();
                 let mut forward_fft = forward_fft_lock.lock().unwrap();
                 let mut inverse_fft = inverse_fft_lock.lock().unwrap();
@@ -430,7 +442,7 @@ impl Lenia for ExpandedLenia {
         // Collapse convolution channel mutexes back into a single owned vector
         let mut convolution_channels: Vec<ConvolutionChannel> =
             Vec::with_capacity(conv_channel_mutexes.len());
-        for i in 0..conv_channel_mutexes.len() {
+        for _ in 0..conv_channel_mutexes.len() {
             let data = conv_channel_mutexes.remove(0);
             convolution_channels.push(Arc::try_unwrap(data).unwrap().into_inner().unwrap());
         }
@@ -466,11 +478,10 @@ impl Lenia for ExpandedLenia {
                     });
                 }
                 // Add update channel and clamp
-                let dt_reciprocal = 1.0 / dt;
                 ndarray::Zip::from(&mut channel.field)
                     .and(&mut deltas.view_mut())
                     .and(&previous_deltas)
-                    .par_for_each(|a, b, c| {
+                    .par_for_each(|a, b, _c| {
                         let previous = *a;
                         *a = (previous + (*b * dt)).clamp(0.0, 1.0);
                     });
@@ -560,7 +571,7 @@ impl Lenia for ExpandedLenia {
                 channel.weight_sum_reciprocal = 1.0 / sum;
             }
         } else {
-            for i in self.conv_channels.len()..num_conv_channels {
+            for _ in self.conv_channels.len()..num_conv_channels {
                 self.conv_channels.push(ConvolutionChannel {
                     input_channel: 0,
                     field: self.conv_channels[0].field.clone(),

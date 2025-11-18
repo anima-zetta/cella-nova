@@ -1,8 +1,5 @@
 //! Contains the required functionality for performing n-dimensional fast-fourier-transforms.
 
-#![allow(dead_code)]
-#![allow(unused_variables)]
-
 use rayon::prelude::*;
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftDirection, FftPlanner};
@@ -42,7 +39,6 @@ impl PlannedFFT {
             panic!("PlannedFFT::new() - Provided length was 0. Length must be at least 1!");
         }
         let mut planner = FftPlanner::new();
-        let direction: FftDirection;
         let direction = match inverse {
             true => FftDirection::Inverse,
             false => FftDirection::Forward,
@@ -59,6 +55,7 @@ impl PlannedFFT {
         self.fft.fft_direction() == FftDirection::Inverse
     }
 
+    #[allow(dead_code)]
     pub fn length(&self) -> usize {
         self.fft.len()
     }
@@ -101,6 +98,7 @@ impl PlannedFFTND {
         }
     }
 
+    #[allow(dead_code)]
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
@@ -161,6 +159,7 @@ impl ParPlannedFFTND {
         }
     }
 
+    #[allow(dead_code)]
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
@@ -185,7 +184,6 @@ impl ParPlannedFFTND {
         }
         for axis in axis_iterator {
             let data_lane = data.lanes_mut(ndarray::Axis(axis));
-            let fft_lane = &mut self.fft_instances[axis];
             ndarray::Zip::from(data_lane).into_par_iter().for_each_with(
                 self.fft_instances[axis].clone(),
                 |fft, mut row| {
