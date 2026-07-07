@@ -1,11 +1,14 @@
-//! `Lenia_ca` — GPU-accelerated Lenia cellular automaton simulation.
+//! `Lenia_ca` — GPU-accelerated Lenia / Flow Lenia cellular automaton simulation.
 //!
-//! All computation (FFT, complex multiply, growth function, channel update)
+//! All computation (FFT, complex multiply, growth function, channel update,
+//! Sobel gradients, flow field, reintegration tracking)
 //! happens as GPU compute shaders via `wgpu`. Channel data is only read back
 //! to the CPU when explicitly requested (for display or export).
 //!
-//! See [`gpu_lenia::GpuLenia`] for the main simulation entry point.
+//! See [`gpu_lenia::GpuLenia`] for standard Lenia and
+//! [`gpu_flow_lenia::GpuFlowLenia`] for Flow Lenia.
 
+pub mod gpu_flow_lenia;
 pub mod gpu_lenia;
 pub mod growth_functions;
 pub mod kernels;
