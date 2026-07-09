@@ -238,59 +238,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 "#;
 
-const WALL_INTERACTION_SHADER: &str = r#"
-// Wall kernel from Sensorimotor Lenia:
-//   K_wall(r) = exp(-(r/2)^2/2) * sigmoid(-10*(r/2 - 1))
-//   G_wall(x) = -10 * max(0, x - 0.001)
-// Small-radius spatial convolution (7x7 neighborhood).
-struct Params { width: u32, height: u32, num_channels: u32 }
-@group(0) @binding(0) var<storage, read> obstacle: array<f32>;
-@group(0) @binding(1) var<storage, read_write> u_channel: array<f32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
-fn wall_kernel(dist: f32) -> f32 {
-    let r = dist / 2.0;
-    let gaussian = exp(-r * r / 2.0);
-    let cutoff = 1.0 / (1.0 + exp(10.0 * (r - 1.0)));
-    return gaussian * cutoff;
-}
-
-fn wall_growth(x: f32) -> f32 {
-    return -10.0 * max(0.0, x - 0.001);
-}
-
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let idx: u32 = id.x;
-    let total: u32 = params.width * params.height * params.num_channels;
-    if (idx >= total) { return; }
-    let c: u32 = idx / (params.width * params.height);
-    let pixel: u32 = idx % (params.width * params.height);
-    let px: u32 = pixel % params.width;
-    let py: u32 = pixel / params.width;
-    let w: u32 = params.width;
-    let h: u32 = params.height;
-    let w_i32: i32 = i32(w);
-    let h_i32: i32 = i32(h);
-    // 7x7 neighborhood convolution
-    var conv: f32 = 0.0;
-    for (var dy: i32 = -3; dy <= 3; dy = dy + 1) {
-        for (var dx: i32 = -3; dx <= 3; dx = dx + 1) {
-            let nx: i32 = i32(px) + dx;
-            let ny: i32 = i32(py) + dy;
-            if (nx < 0 || nx >= w_i32 || ny < 0 || ny >= h_i32) { continue; }
-            let n_idx: u32 = u32(ny) * w + u32(nx);
-            let obs: f32 = obstacle[n_idx];
-            if (obs <= 0.0) { continue; }
-            let dist: f32 = sqrt(f32(dx * dx + dy * dy));
-            conv = conv + obs * wall_kernel(dist);
-        }
-    }
-    let growth: f32 = wall_growth(conv);
-    u_channel[idx] = u_channel[idx] + growth;
-}
-"#;
-
 // ---------------------------------------------------------------------------
 // CPU-side kernel generation
 // ---------------------------------------------------------------------------
@@ -438,9 +385,6 @@ pub struct GpuFlowLenia {
     flow_x_buffer: wgpu::Buffer,
     flow_y_buffer: wgpu::Buffer,
 
-    // Obstacle channel
-    obstacle_buffer: wgpu::Buffer,
-
     // FFT
     forward_fft_1d: Vec<WgpuFFT1D>,
     inverse_fft_1d: Vec<WgpuFFT1D>,
@@ -455,7 +399,6 @@ pub struct GpuFlowLenia {
     sum_channels_pipeline: wgpu::ComputePipeline,
     flow_field_pipeline: wgpu::ComputePipeline,
     reintegration_pipeline: wgpu::ComputePipeline,
-    wall_interaction_pipeline: wgpu::ComputePipeline,
 
     // Bind group layouts
     copy_to_conv_bgl: wgpu::BindGroupLayout,
@@ -467,7 +410,6 @@ pub struct GpuFlowLenia {
     sum_channels_bgl: wgpu::BindGroupLayout,
     flow_field_bgl: wgpu::BindGroupLayout,
     reintegration_bgl: wgpu::BindGroupLayout,
-    wall_interaction_bgl: wgpu::BindGroupLayout,
 
     // Cached bind groups (static bindings)
     normalize_bg: wgpu::BindGroup,
@@ -477,7 +419,6 @@ pub struct GpuFlowLenia {
     sum_channels_bg: wgpu::BindGroup,
     flow_field_bg: wgpu::BindGroup,
     reintegration_bg: wgpu::BindGroup,
-    wall_interaction_bg: wgpu::BindGroup,
 
     // Uniform buffers
     growth_params_buffer: wgpu::Buffer,
@@ -488,7 +429,6 @@ pub struct GpuFlowLenia {
     sum_channels_params_buffer: wgpu::Buffer,
     flow_field_params_buffer: wgpu::Buffer,
     reintegration_params_buffer: wgpu::Buffer,
-    wall_params_buffer: wgpu::Buffer,
 
     // Mapping buffers
     c1_flat_buffer: wgpu::Buffer,
@@ -585,9 +525,6 @@ impl GpuFlowLenia {
         let flow_x_buffer = make_storage("fl::flow_x", uc_size);
         let flow_y_buffer = make_storage("fl::flow_y", uc_size);
 
-        // Obstacle channel (single channel, X*Y f32)
-        let obstacle_buffer = make_storage("fl::obstacle", buf_size);
-
         // Uniform buffers
         let growth_params_buffer = make_uniform("fl::growth_params", 12);
         let normalize_params_buffer = make_uniform("fl::normalize_params", 4);
@@ -597,7 +534,6 @@ impl GpuFlowLenia {
         let sum_channels_params_buffer = make_uniform("fl::sc_params", 8);
         let flow_field_params_buffer = make_uniform("fl::ff_params", 12);
         let reintegration_params_buffer = make_uniform("fl::ri_params", 36);
-        let wall_params_buffer = make_uniform("fl::wall_params", 12);
 
         // Mapping buffers
         let c1_flat_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -641,7 +577,6 @@ impl GpuFlowLenia {
         let sum_channels_sm = sm("fl::sum_channels", SUM_CHANNELS_SHADER);
         let flow_field_sm = sm("fl::flow_field", FLOW_FIELD_SHADER);
         let reintegration_sm = sm("fl::reintegration", REINTEGRATION_SHADER);
-        let wall_interaction_sm = sm("fl::wall_interaction", WALL_INTERACTION_SHADER);
 
         // --- Bind group layout helpers ---
         let sro = |b: u32| wgpu::BindGroupLayoutEntry {
@@ -721,11 +656,6 @@ impl GpuFlowLenia {
             label: Some("fl::ri bgl"),
             entries: &[sro(0), sro(1), sro(2), srw(3), unif(4)],
         });
-        let wall_interaction_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("fl::wall bgl"),
-                entries: &[sro(0), srw(1), unif(2)],
-            });
 
         // --- Pipeline layouts & pipelines ---
         let pl = |label: &str, bgl: &wgpu::BindGroupLayout| -> wgpu::PipelineLayout {
@@ -780,11 +710,6 @@ impl GpuFlowLenia {
             &pl("fl::ri pl", &reintegration_bgl),
             &reintegration_sm,
         );
-        let wall_interaction_pipeline = cp(
-            "fl::wall",
-            &pl("fl::wall pl", &wall_interaction_bgl),
-            &wall_interaction_sm,
-        );
 
         // --- Write uniform params ---
         let padded_n = forward_fft_1d[0].padded_len() as f32;
@@ -836,12 +761,7 @@ impl GpuFlowLenia {
             queue.write_buffer(&reintegration_params_buffer, 0, &data);
         }
 
-        // wall_params: width(u32), height(u32), num_channels(u32)
-        {
-            let wp: [u32; 3] = [shape[0] as u32, shape[1] as u32, num_channels as u32];
-            queue.write_buffer(&wall_params_buffer, 0, bytemuck::cast_slice(&wp));
-        }
-
+        // --- Write uniform params ---
         // --- Cached bind groups ---
         let normalize_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fl::normalize bg"),
@@ -1016,25 +936,6 @@ impl GpuFlowLenia {
             ],
         });
 
-        let wall_interaction_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fl::wall bg"),
-            layout: &wall_interaction_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: obstacle_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: u_channel_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wall_params_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
         GpuFlowLenia {
             context,
             shape: shape.to_vec(),
@@ -1066,7 +967,6 @@ impl GpuFlowLenia {
             sum_a_buffer,
             flow_x_buffer,
             flow_y_buffer,
-            obstacle_buffer,
             forward_fft_1d,
             inverse_fft_1d,
             copy_to_conv_pipeline,
@@ -1078,7 +978,6 @@ impl GpuFlowLenia {
             sum_channels_pipeline,
             flow_field_pipeline,
             reintegration_pipeline,
-            wall_interaction_pipeline,
             copy_to_conv_bgl,
             complex_mul_bgl,
             normalize_bgl,
@@ -1088,7 +987,6 @@ impl GpuFlowLenia {
             sum_channels_bgl,
             flow_field_bgl,
             reintegration_bgl,
-            wall_interaction_bgl,
             normalize_bg,
             channel_aggregate_bg,
             sobel_u_bg,
@@ -1096,7 +994,6 @@ impl GpuFlowLenia {
             sum_channels_bg,
             flow_field_bg,
             reintegration_bg,
-            wall_interaction_bg,
             growth_params_buffer,
             normalize_params_buffer,
             channel_aggregate_params_buffer,
@@ -1105,7 +1002,6 @@ impl GpuFlowLenia {
             sum_channels_params_buffer,
             flow_field_params_buffer,
             reintegration_params_buffer,
-            wall_params_buffer,
             c1_flat_buffer,
             c1_offsets_buffer,
             readback_buffer,
@@ -1168,19 +1064,6 @@ impl GpuFlowLenia {
             offset,
             bytemuck::cast_slice(&f32_data),
         );
-    }
-
-    /// Uploads obstacle data (single channel, values 0.0 or 1.0).
-    pub fn upload_obstacles(&self, data: &[f32]) {
-        assert_eq!(data.len(), self.total_elements);
-        self.context
-            .queue
-            .write_buffer(&self.obstacle_buffer, 0, bytemuck::cast_slice(data));
-    }
-
-    /// Returns a reference to the obstacle buffer for rendering.
-    pub fn obstacle_buffer(&self) -> &wgpu::Buffer {
-        &self.obstacle_buffer
     }
 
     /// Update growth parameters for a single kernel.
@@ -1516,16 +1399,6 @@ impl GpuFlowLenia {
                     encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ca") });
                 p.set_pipeline(&self.channel_aggregate_pipeline);
                 p.set_bind_group(0, &self.channel_aggregate_bg, &[]);
-                p.dispatch_workgroups(wg_c, 1, 1);
-            }
-
-            // Wall interaction: obstacle → negative growth on u_channel_buffer
-            {
-                let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("wall"),
-                });
-                p.set_pipeline(&self.wall_interaction_pipeline);
-                p.set_bind_group(0, &self.wall_interaction_bg, &[]);
                 p.dispatch_workgroups(wg_c, 1, 1);
             }
 

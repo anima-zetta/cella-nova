@@ -1,0 +1,19 @@
+{
+  "channels": [
+    {
+      "sigma": 0.25,
+      "offset_x": 0.0,
+      "offset_y": 0.0
+    },
+    {
+      "sigma": 0.22,
+      "offset_x": 0.04,
+      "offset_y": 0.0
+    },
+    {
+      "sigma": 0.28,
+      "offset_x": 0.0,
+      "offset_y": 0.04
+    }
+  ]
+}

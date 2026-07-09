@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Flow Lenia Training — PyTorch GPU (batched)
+Glider Speed Training — Flow Lenia (PyTorch GPU)
 
-All per-kernel and per-channel operations are batched for GPU efficiency.
-Autograd handles the backward pass automatically.
+Generates a multi-channel asymmetric seed and trains the Flow Lenia kernels
+to move it faster or make it more resilient.
 
 Usage:
     python train/train_lenia.py
-    python train/train_lenia.py --eval trained_kernels.bin
+    python train/train_lenia.py --epochs 200
 """
 
 import argparse
+import json
 import math
+import os
 import random
 import struct
 import time
@@ -19,6 +21,12 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 # =========================================================================
 # Constants
@@ -38,91 +46,37 @@ C1 = [[0, 1, 6], [2, 3, 4], [5, 7, 8]]
 GLOBAL_R = 42.0
 RADII = [0.8, 0.6, 1.0, 0.7, 0.5, 0.9, 0.65, 0.55, 0.85]
 A_FLAT = [
-    0.0,
-    0.6,
-    0.0,
-    0.0,
-    0.5,
-    0.0,
-    0.0,
-    0.7,
-    0.0,
-    0.0,
-    0.55,
-    0.0,
-    0.0,
-    0.45,
-    0.0,
-    0.0,
-    0.65,
-    0.0,
-    0.0,
-    0.5,
-    0.0,
-    0.0,
-    0.6,
-    0.0,
-    0.0,
-    0.55,
-    0.0,
+    0.0, 0.6, 0.0,
+    0.0, 0.5, 0.0,
+    0.0, 0.7, 0.0,
+    0.0, 0.55, 0.0,
+    0.0, 0.45, 0.0,
+    0.0, 0.65, 0.0,
+    0.0, 0.5, 0.0,
+    0.0, 0.6, 0.0,
+    0.0, 0.55, 0.0,
 ]
 W_FLAT = [
-    0.08,
-    0.06,
-    0.01,
-    0.07,
-    0.05,
-    0.01,
-    0.09,
-    0.07,
-    0.01,
-    0.08,
-    0.06,
-    0.01,
-    0.07,
-    0.05,
-    0.01,
-    0.09,
-    0.07,
-    0.01,
-    0.08,
-    0.06,
-    0.01,
-    0.07,
-    0.05,
-    0.01,
-    0.08,
-    0.06,
-    0.01,
+    0.08, 0.06, 0.01,
+    0.07, 0.05, 0.01,
+    0.09, 0.07, 0.01,
+    0.08, 0.06, 0.01,
+    0.07, 0.05, 0.01,
+    0.09, 0.07, 0.01,
+    0.08, 0.06, 0.01,
+    0.07, 0.05, 0.01,
+    0.08, 0.06, 0.01,
 ]
 B_FLAT = [
-    0.8,
-    -0.3,
-    0.0,
-    0.7,
-    -0.25,
-    0.0,
-    0.9,
-    -0.35,
-    0.0,
-    0.75,
-    -0.3,
-    0.0,
-    0.65,
-    -0.2,
-    0.0,
-    0.85,
-    -0.35,
-    0.0,
-    0.7,
-    -0.25,
-    0.0,
-    0.6,
-    -0.2,
-    0.0,
-    0.8,
-    -0.3,
-    0.0,
+    0.8, -0.3, 0.0,
+    0.7, -0.25, 0.0,
+    0.9, -0.35, 0.0,
+    0.75, -0.3, 0.0,
+    0.65, -0.2, 0.0,
+    0.85, -0.35, 0.0,
+    0.7, -0.25, 0.0,
+    0.6, -0.2, 0.0,
+    0.8, -0.3, 0.0,
 ]
 
 if torch.backends.mps.is_available():
@@ -254,113 +208,81 @@ class FlowLeniaTorch(torch.nn.Module):
         return gx, gy
 
     def _reintegrate(self, channels, flow_x, flow_y):
-        """Gaussian-weighted neighborhood sum advection (matches Rust GPU).
+        """Batched semi-Lagrangian advection via manual bilinear interpolation.
 
-        Uses F.unfold to batch all neighbor contributions in a single pass.
-        The tent function has support of ~1.15px, so effective range is [-2, 2]
-        (25 neighbors) rather than the full [-dd, dd] (121 neighbors).
+        Uses only basic tensor ops (floor, clamp, indexing, arithmetic) that
+        are all natively supported on MPS, avoiding grid_sampler_2d_backward.
 
         channels: [nc, H, W]
         flow_x, flow_y: [nc, H, W]
         """
         nc, H, W = channels.shape
-        dd = self.dd
-        sigma = self.sigma
-        dt = self.dt
-        ma = dd - sigma
-        max_sz = min(1.0, 2.0 * sigma)
-        area_norm = 4.0 * sigma * sigma
+        ma = self.dd - self.sigma
 
         fx = flow_x.clamp(-ma, ma)
         fy = flow_y.clamp(-ma, ma)
 
-        # Effective neighborhood: tent support is ~1.15px, so [-2, 2] suffices
-        eff_dd = 2
-        K = (2 * eff_dd + 1) ** 2  # 25
+        # Pixel center coordinates [H, W]
+        y = torch.arange(H, dtype=torch.float32, device=channels.device)
+        x = torch.arange(W, dtype=torch.float32, device=channels.device)
+        gy, gx = torch.meshgrid(y, x, indexing="ij")
 
-        # Extract all patches at once via unfold
-        # [nc, 1, H, W] -> unfold -> [nc, K, H*W]
-        ch_patches = F.unfold(
-            channels.unsqueeze(1), kernel_size=2 * eff_dd + 1, padding=eff_dd
+        # Back-track: source = destination - flow * dt  [nc, H, W]
+        src_x = (gx + 0.5) - fx * self.dt
+        src_y = (gy + 0.5) - fy * self.dt
+
+        # Integer neighbors (floor/ceil of source coords)
+        x0 = torch.floor(src_x)  # [nc, H, W]
+        y0 = torch.floor(src_y)
+        x1 = x0 + 1.0
+        y1 = y0 + 1.0
+
+        # Bilinear weights (fractional part)
+        xw = src_x - x0  # weight for x1
+        yw = src_y - y0  # weight for y1
+
+        # Clamp coordinates to valid range [0, W-1] / [0, H-1]
+        x0c = x0.clamp(0, W - 1).long()
+        x1c = x1.clamp(0, W - 1).long()
+        y0c = y0.clamp(0, H - 1).long()
+        y1c = y1.clamp(0, H - 1).long()
+
+        # Validity masks: 1 if original coord is in-bounds, 0 otherwise
+        in_x0 = ((x0 >= 0) & (x0 < W)).float()
+        in_x1 = ((x1 >= 0) & (x1 < W)).float()
+        in_y0 = ((y0 >= 0) & (y0 < H)).float()
+        in_y1 = ((y1 >= 0) & (y1 < H)).float()
+
+        # Gather values at the 4 corners using advanced indexing
+        batch_idx = (
+            torch.arange(nc, device=channels.device).view(nc, 1, 1).expand(nc, H, W)
         )
-        fx_patches = F.unfold(
-            fx.unsqueeze(1), kernel_size=2 * eff_dd + 1, padding=eff_dd
+
+        v00 = channels[batch_idx, y0c, x0c] * in_x0 * in_y0
+        v01 = channels[batch_idx, y0c, x1c] * in_x1 * in_y0
+        v10 = channels[batch_idx, y1c, x0c] * in_x0 * in_y1
+        v11 = channels[batch_idx, y1c, x1c] * in_x1 * in_y1
+
+        # Bilinear interpolation
+        new_ch = (
+            v00 * (1.0 - xw) * (1.0 - yw)
+            + v01 * xw * (1.0 - yw)
+            + v10 * (1.0 - xw) * yw
+            + v11 * xw * yw
         )
-        fy_patches = F.unfold(
-            fy.unsqueeze(1), kernel_size=2 * eff_dd + 1, padding=eff_dd
-        )
 
-        # Offset grid for all K positions
-        offsets = torch.arange(-eff_dd, eff_dd + 1, device=channels.device)
-        grid_y, grid_x = torch.meshgrid(offsets, offsets, indexing="ij")
-        dx_all = grid_x.reshape(1, K, 1).float()  # [1, K, 1]
-        dy_all = grid_y.reshape(1, K, 1).float()
-
-        # Compute tent weights for all K positions at once
-        dpx = torch.abs(dx_all + fx_patches * dt)  # [nc, K, H*W]
-        dpy = torch.abs(dy_all + fy_patches * dt)
-        sz_x = torch.clamp(0.5 - dpx + sigma, 0.0, max_sz)
-        sz_y = torch.clamp(0.5 - dpy + sigma, 0.0, max_sz)
-        area = (sz_x * sz_y) / area_norm  # [nc, K, H*W]
-
-        # Mask: only contribute if channel value > 0 (matches Rust GPU)
-        mask = (ch_patches > 0.0).float()
-        weighted = ch_patches * area * mask  # [nc, K, H*W]
-
-        # Sum over all K neighbor positions
-        new_ch = weighted.sum(dim=1).reshape(nc, H, W)  # [nc, H, W]
-
-        # Metabolic costs (using flow at the current pixel, not neighbor)
+        # Metabolic costs (batched)
         flow_mag = torch.sqrt(fx**2 + fy**2 + 1e-8)
         new_ch = (
-            new_ch * (1.0 - self.basal_rate * dt) - self.kinetic_cost * flow_mag * dt
+            new_ch * (1.0 - self.basal_rate * self.dt)
+            - self.kinetic_cost * flow_mag * self.dt
         )
         new_ch = new_ch.clamp(min=0.0)
 
         return new_ch
 
-    def _step(self, ch):
-        """Single timestep. Extracted for gradient checkpointing."""
-        H, W = self.size, self.size
-
-        # --- Batched per-kernel convolution ---
-        src = ch[self.c0_idx]  # [nk, H, W]
-        kfft = torch.view_as_complex(self.kernels_fft)  # [nk, H, W]
-        conv_fft = torch.fft.fft2(src) * kfft  # [nk, H, W]
-        conv = torch.fft.ifft2(conv_fft).real / (H * W)  # [nk, H, W]
-
-        # Batched growth
-        u = self._growth(conv)  # [nk, H, W]
-
-        # --- Batched channel aggregate ---
-        u_channel = (self.channel_agg_weight @ u.reshape(self.nk, -1)).reshape(
-            self.nc, H, W
-        )
-
-        # --- Sum channels ---
-        sum_a = ch.sum(dim=0)  # [H, W]
-
-        # --- Batched Sobel ---
-        nabla_ux, nabla_uy = self._sobel(u_channel)  # [nc, H, W]
-        nabla_ax, nabla_ay = self._sobel(sum_a.unsqueeze(0))  # [1, H, W]
-        nabla_ax, nabla_ay = nabla_ax[0], nabla_ay[0]  # [H, W]
-
-        # --- Flow field ---
-        alpha = torch.clamp((ch / self.nc) ** 2, 0.0, 1.0)  # [nc, H, W]
-        flow_x = nabla_ux * (1.0 - alpha) - nabla_ax * alpha
-        flow_y = nabla_uy * (1.0 - alpha) - nabla_ay * alpha
-
-        # --- Batched reintegration ---
-        ch = self._reintegrate(ch, flow_x, flow_y)
-
-        return ch
-
     def forward(self, channels, num_steps):
-        """Run forward pass for num_steps with gradient checkpointing.
-
-        Checkpointing discards intermediate activations between timesteps
-        to avoid OOM on long BPTT sequences. They are recomputed during
-        the backward pass.
+        """Run forward pass for num_steps.
 
         Args:
             channels: [nc, H, W] initial state.
@@ -370,9 +292,38 @@ class FlowLeniaTorch(torch.nn.Module):
             [nc, H, W] final state.
         """
         ch = channels
+        H, W = self.size, self.size
 
         for _ in range(num_steps):
-            ch = torch.utils.checkpoint.checkpoint(self._step, ch, use_reentrant=False)
+            # --- Batched per-kernel convolution ---
+            src = ch[self.c0_idx]  # [nk, H, W]
+            kfft = torch.view_as_complex(self.kernels_fft)  # [nk, H, W]
+            conv_fft = torch.fft.fft2(src) * kfft  # [nk, H, W]
+            conv = torch.fft.ifft2(conv_fft).real / (H * W)  # [nk, H, W]
+
+            # Batched growth
+            u = self._growth(conv)  # [nk, H, W]
+
+            # --- Batched channel aggregate ---
+            u_channel = (self.channel_agg_weight @ u.reshape(self.nk, -1)).reshape(
+                self.nc, H, W
+            )
+
+            # --- Sum channels ---
+            sum_a = ch.sum(dim=0)  # [H, W]
+
+            # --- Batched Sobel ---
+            nabla_ux, nabla_uy = self._sobel(u_channel)  # [nc, H, W]
+            nabla_ax, nabla_ay = self._sobel(sum_a.unsqueeze(0))  # [1, H, W]
+            nabla_ax, nabla_ay = nabla_ax[0], nabla_ay[0]  # [H, W]
+
+            # --- Flow field ---
+            alpha = torch.clamp((ch / self.nc) ** 2, 0.0, 1.0)  # [nc, H, W]
+            flow_x = nabla_ux * (1.0 - alpha) - nabla_ax * alpha
+            flow_y = nabla_uy * (1.0 - alpha) - nabla_ay * alpha
+
+            # --- Batched reintegration ---
+            ch = self._reintegrate(ch, flow_x, flow_y)
 
         return ch
 
@@ -401,46 +352,6 @@ def center_of_mass(state, width):
     return (0.0, 0.0)
 
 
-def make_target_shape(radius=18.0):
-    t = np.zeros((32, 32), dtype=np.float64)
-    for i in range(32):
-        for j in range(32):
-            dx = i - 16.0
-            dy = j - 16.0
-            dist = math.sqrt(dx * dx + dy * dy) / radius
-            if dist < 1.0:
-                t[i, j] = 0.1
-            if dist < 0.5:
-                t[i, j] = 0.9
-    return t
-
-
-def place_target(target_shape, grid_size, cx, cy):
-    t = np.zeros(grid_size * grid_size, dtype=np.float64)
-    for i in range(32):
-        for j in range(32):
-            px = cx + i - 16
-            py = cy + j - 16
-            if 0 <= px < grid_size and 0 <= py < grid_size:
-                t[py * grid_size + px] = target_shape[j, i]
-    return t
-
-
-def make_init_patch(grid_size, patch_size=32):
-    ch0 = np.zeros(grid_size * grid_size, dtype=np.float64)
-    cx = grid_size // 2
-    cy = grid_size // 2
-    x0 = cx - patch_size // 2
-    y0 = cy - patch_size // 2
-    for dy in range(patch_size):
-        for dx in range(patch_size):
-            px = x0 + dx
-            py = y0 + dy
-            if 0 <= px < grid_size and 0 <= py < grid_size:
-                ch0[py * grid_size + px] = random.random()
-    return ch0
-
-
 def save_kernels(filename, model, num_kernels, grid_size):
     all_kernels = []
     for k in range(num_kernels):
@@ -459,42 +370,100 @@ def save_kernels(filename, model, num_kernels, grid_size):
     print(f"Saved {num_kernels} kernels ({total} elements each) to {filename}")
 
 
-def load_kernels(filename, num_kernels, grid_size):
-    with open(filename, "rb") as f:
-        header = f.read(12)
-        nk, gs, total = struct.unpack("III", header)
-        assert nk == num_kernels, f"File has {nk} kernels, expected {num_kernels}"
-        assert gs == grid_size, f"File has grid {gs}, expected {grid_size}"
-        data = struct.unpack(f"{nk * total * 2}f", f.read())
+def save_kernels_png(model, num_kernels, grid_size, out_dir="train/kernels_png"):
+    """Save each kernel as a PNG by converting from FFT domain to spatial domain."""
+    if not HAS_PIL:
+        print("PIL not available, skipping kernel PNGs")
+        return
+    os.makedirs(out_dir, exist_ok=True)
 
-    kernels = []
     for k in range(num_kernels):
-        start = k * total * 2
-        end = start + total * 2
-        kdata = np.array(data[start:end], dtype=np.float32)
-        kernels.append(kdata[0::2] + 1j * kdata[1::2])
-    print(f"Loaded {num_kernels} kernels from {filename}")
-    return kernels
+        # Convert from FFT domain to spatial domain
+        kfft = torch.view_as_complex(model.kernels_fft[k])  # [H, W] complex
+        k_spatial = torch.fft.ifft2(kfft).real  # [H, W] real-valued
+
+        # Normalize to [0, 255]
+        k_min = k_spatial.min()
+        k_max = k_spatial.max()
+        if k_max > k_min:
+            k_norm = (k_spatial - k_min) / (k_max - k_min)
+        else:
+            k_norm = torch.zeros_like(k_spatial)
+        k_img = (k_norm * 255).cpu().numpy().astype(np.uint8)
+
+        path = os.path.join(out_dir, f"kernel_{k}.png")
+        Image.fromarray(k_img, mode="L").save(path)
+
+    print(f"Saved {num_kernels} kernel PNGs to {out_dir}/")
 
 
 # =========================================================================
-# Training
+# Initial seed generation
 # =========================================================================
 
 
-def run_training(args):
-    print("=" * 60)
-    print(f"Flow Lenia Training — PyTorch GPU (batched) [{device}]")
-    print("=" * 60)
+def generate_initial_glider_seed(size=512, device=device, seed_path="seed/glider.json"):
+    """Generates a multi-channel asymmetric localized seed canvas for Flow Lenia.
 
+    Reads channel parameters (sigma, offset_x, offset_y) from a JSON file.
+    Creates a 3-channel (RGB) tensor of shape [3, size, size] normalized
+    between 0.0 and 1.0.
+    """
+    with open(seed_path) as f:
+        config = json.load(f)
+
+    # Create coordinate mesh grid scaled between -1.0 and 1.0
+    y = torch.linspace(-1, 1, size, device=device)
+    x = torch.linspace(-1, 1, size, device=device)
+    gy, gx = torch.meshgrid(y, x, indexing="ij")
+
+    channels = []
+    for ch in config["channels"]:
+        sigma = ch["sigma"]
+        ox = ch["offset_x"]
+        oy = ch["offset_y"]
+        channel = torch.exp(-((gx - ox)**2 + (gy - oy)**2) / (2 * sigma**2))
+        channels.append(channel)
+
+    initial_state = torch.stack(channels, dim=0)
+    return torch.clamp(initial_state, 0.0, 1.0)
+
+
+# =========================================================================
+# Glider Training
+# =========================================================================
+
+
+def run_train_glider(args):
+    """Train a glider to move faster using Flow Lenia.
+
+    Approach:
+      1. Generate a multi-channel asymmetric seed as the initial state.
+      2. Use FlowLeniaTorch with trainable kernel FFT weights.
+      3. Place a target at increasing distances along a random direction.
+      4. Loss = MSE between final state and target (supervised).
+    """
     grid_size = args.grid_size
     num_channels = args.num_channels
     num_kernels = args.num_kernels
     num_steps = args.num_steps
     lr = args.lr
-    num_trials = args.trials
-    steps_per_stage = args.steps_per_stage
+    num_epochs = args.epochs
 
+    print("=" * 60, flush=True)
+    print(f"Glider Speed Training — Flow Lenia [{device}]", flush=True)
+    print("=" * 60, flush=True)
+    print(f"Grid: {grid_size}, Channels: {num_channels}, Kernels: {num_kernels}", flush=True)
+    print(f"Steps: {num_steps}, Epochs: {num_epochs}, LR: {lr}", flush=True)
+    print(flush=True)
+
+    # Generate initial seed
+    seed = generate_initial_glider_seed(grid_size, device)  # [3, H, W]
+    center = grid_size // 2
+    initial_mass = seed[0].sum()
+    print(f"Initial mass (ch0): {initial_mass.item():.1f}", flush=True)
+
+    # Create Flow Lenia model
     model = FlowLeniaTorch(
         grid_size,
         num_channels,
@@ -512,166 +481,90 @@ def run_training(args):
 
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
-    init_patch = make_init_patch(grid_size, args.patch_size)
-    center = grid_size // 2
-    target_shape = make_target_shape(18.0)
-
-    stage_distances = [0.0, 8.0, 16.0, 32.0, 48.0, 64.0]
+    # Curriculum: increasing target distances
+    stage_distances = [0, 8, 16, 24, 32, 48, 64]
+    steps_per_stage = max(1, num_epochs // len(stage_distances))
 
     angle = random.random() * 2.0 * math.pi
     dir_x = math.cos(angle)
     dir_y = math.sin(angle)
-    print(f"Direction: ({dir_x:.2f}, {dir_y:.2f})")
-    print(f"Stages: {len(stage_distances)} distances, {steps_per_stage} steps each")
-    print(f"Trials: {num_trials}, LR: {lr}, Steps: {num_steps}")
-    print()
+    print(f"Direction: ({dir_x:.2f}, {dir_y:.2f})", flush=True)
+    print(f"Stages: {len(stage_distances)} distances, ~{steps_per_stage} epochs each", flush=True)
+    print(flush=True)
 
     best_disp = 0.0
+    epoch = 0
 
-    for trial in range(num_trials):
-        print(f"\n=== Trial {trial} ===")
+    for stage_idx, distance in enumerate(stage_distances):
+        tcx = int(round(center + dir_x * distance))
+        tcy = int(round(center + dir_y * distance))
+        tcx = max(16, min(grid_size - 16, tcx))
+        tcy = max(16, min(grid_size - 16, tcy))
 
-        with torch.no_grad():
-            noise = torch.randn_like(model.kernels_fft) * 0.01
-            model.kernels_fft.add_(noise)
+        # Create target: seed's channel 0 placed at target position
+        target = torch.zeros(grid_size, grid_size, device=device)
+        # Extract the non-zero region of channel 0
+        nonzero = seed[0] > 0.01
+        rows = torch.any(nonzero, dim=1).nonzero(as_tuple=True)[0]
+        cols = torch.any(nonzero, dim=0).nonzero(as_tuple=True)[0]
+        if len(rows) > 0 and len(cols) > 0:
+            y0_src = rows[0].item()
+            y1_src = rows[-1].item() + 1
+            x0_src = cols[0].item()
+            x1_src = cols[-1].item() + 1
+            patch = seed[0, y0_src:y1_src, x0_src:x1_src]
+            ph = patch.shape[0]
+            pw = patch.shape[1]
+            ty0 = max(0, tcy - ph // 2)
+            tx0 = max(0, tcx - pw // 2)
+            ty1 = min(grid_size, ty0 + ph)
+            tx1 = min(grid_size, tx0 + pw)
+            # Adjust patch slice to match
+            py0 = 0 if ty0 == 0 else (ph - (ty1 - ty0))
+            px0 = 0 if tx0 == 0 else (pw - (tx1 - tx0))
+            target[ty0:ty1, tx0:tx1] = patch[py0:py0+ty1-ty0, px0:px0+tx1-tx0]
 
-        for stage_idx, distance in enumerate(stage_distances):
-            tcx = int(round(center + dir_x * distance))
-            tcy = int(round(center + dir_y * distance))
-            tcx = max(16, min(grid_size - 16, tcx))
-            tcy = max(16, min(grid_size - 16, tcy))
-            target_flat = place_target(target_shape, grid_size, tcx, tcy)
-            target_t = torch.from_numpy(
-                target_flat.reshape(grid_size, grid_size).astype(np.float32)
-            ).to(device)
+        for s in range(steps_per_stage):
+            if epoch >= num_epochs:
+                break
 
-            for step in range(steps_per_stage):
-                t0 = time.time()
+            # Reset state with seed plus tiny noise
+            channels = seed + torch.randn_like(seed) * 0.005
+            channels = channels.clamp(0.0, 1.0)
 
-                # Reset state
-                init_t = torch.from_numpy(
-                    init_patch.reshape(grid_size, grid_size).astype(np.float32)
-                ).to(device)
-                channels = torch.zeros(
-                    num_channels, grid_size, grid_size, device=device
-                )
-                channels[0] = init_t
-
-                # Forward + loss + backward
-                optimizer.zero_grad()
-                final = model(channels, num_steps)
-                loss = F.mse_loss(final[0], target_t)
-                loss.backward()
-                optimizer.step()
-
-                elapsed = time.time() - t0
-
-                if step % 5 == 0:
-                    grad_norm = 0.0
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            grad_norm += p.grad.norm().item() ** 2
-                    grad_norm = math.sqrt(grad_norm)
-
-                    state = final.detach().cpu().numpy().ravel()
-                    com_x, com_y = center_of_mass(state, grid_size)
-                    total_mass = float(final[0].sum().item())
-                    disp = math.sqrt((com_x - center) ** 2 + (com_y - center) ** 2)
-
-                    print(
-                        f"  T{trial} s{step:3d}: loss={loss.item():.6f} "
-                        f"|g|={grad_norm:.1f} "
-                        f"com=({com_x:.0f},{com_y:.0f}) "
-                        f"disp={disp:.1f} "
-                        f"sum={total_mass:.1f} "
-                        f"{elapsed * 1000:.0f}ms"
-                    )
-
-        # Evaluate trial
-        with torch.no_grad():
-            init_t = torch.from_numpy(
-                init_patch.reshape(grid_size, grid_size).astype(np.float32)
-            ).to(device)
-            channels = torch.zeros(num_channels, grid_size, grid_size, device=device)
-            channels[0] = init_t
+            # Forward + loss + backward
+            optimizer.zero_grad()
             final = model(channels, num_steps)
-            state = final.detach().cpu().numpy().ravel()
-            com_x, com_y = center_of_mass(state, grid_size)
-            disp = math.sqrt((com_x - center) ** 2 + (com_y - center) ** 2)
-            total_mass = float(final[0].sum().item())
-            print(
-                f"  => Trial {trial} final: "
-                f"com=({com_x:.0f},{com_y:.0f}) "
-                f"disp={disp:.1f} sum={total_mass:.1f}"
-            )
+            loss = F.mse_loss(final[0], target)
+            loss.backward()
+            optimizer.step()
 
-            if disp > best_disp:
-                best_disp = disp
-                print("  => New best!")
-                save_kernels(args.output, model, num_kernels, grid_size)
-
-    print(f"\n=== Best displacement: {best_disp:.1f} ===")
-
-
-# =========================================================================
-# Evaluation
-# =========================================================================
-
-
-def run_eval(args):
-    grid_size = args.grid_size
-    num_channels = args.num_channels
-    num_kernels = args.num_kernels
-    num_steps = args.num_steps
-    center = grid_size // 2
-
-    kernels = load_kernels(args.eval, num_kernels, grid_size)
-
-    model = FlowLeniaTorch(
-        grid_size,
-        num_channels,
-        num_kernels,
-        C0,
-        C1,
-        DT,
-        DD,
-        SIGMA,
-        0.0,
-        0.0,
-    ).to(device)
-
-    with torch.no_grad():
-        for k in range(num_kernels):
-            kt = torch.from_numpy(
-                np.stack([kernels[k].real, kernels[k].imag], axis=-1)
-            ).to(device)
-            model.kernels_fft[k] = kt
-
-    init_patch = make_init_patch(grid_size, args.patch_size)
-
-    with torch.no_grad():
-        init_t = torch.from_numpy(
-            init_patch.reshape(grid_size, grid_size).astype(np.float32)
-        ).to(device)
-        channels = torch.zeros(num_channels, grid_size, grid_size, device=device)
-        channels[0] = init_t
-
-        for step in range(num_steps):
-            channels = model(channels, 1)
-            if step % 10 == 0 or step == num_steps - 1:
-                state = channels.detach().cpu().numpy().ravel()
+            # Evaluate
+            with torch.no_grad():
+                state = final[0].detach().cpu().numpy().ravel()
                 com_x, com_y = center_of_mass(state, grid_size)
-                total_mass = float(channels[0].sum().item())
                 disp = math.sqrt((com_x - center) ** 2 + (com_y - center) ** 2)
+                total_mass = float(final[0].sum().item())
+
+                if disp > best_disp and total_mass > 0.3 * initial_mass.item():
+                    best_disp = disp
+                    save_kernels(args.output, model, num_kernels, grid_size)
+                    if args.save_png:
+                        save_kernels_png(model, num_kernels, grid_size)
+
+            if epoch % 5 == 0 or epoch == num_epochs - 1:
                 print(
-                    f"  Step {step:3d}: com=({com_x:.0f},{com_y:.0f}) "
-                    f"disp={disp:.1f} sum={total_mass:.1f}"
+                    f"  Epoch {epoch:3d} (d={distance:2d}): "
+                    f"mse={loss.item():.6f} "
+                    f"disp={disp:.1f}px "
+                    f"mass={total_mass:.1f}/{initial_mass.item():.1f} "
+                    f"best={best_disp:.1f}",
+                    flush=True,
                 )
 
-        state = channels.detach().cpu().numpy().ravel()
-        com_x, com_y = center_of_mass(state, grid_size)
-        disp = math.sqrt((com_x - center) ** 2 + (com_y - center) ** 2)
-        print(f"\nFinal: com=({com_x:.0f},{com_y:.0f}) disp={disp:.1f}")
+            epoch += 1
+
+    print(f"\n=== Best displacement: {best_disp:.1f}px ===", flush=True)
 
 
 # =========================================================================
@@ -680,28 +573,20 @@ def run_eval(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Flow Lenia Training (PyTorch GPU)")
-    parser.add_argument(
-        "--eval",
-        type=str,
-        default=None,
-        help="Load trained kernels from file and evaluate",
-    )
+    parser = argparse.ArgumentParser(description="Glider Speed Training (Flow Lenia, PyTorch GPU)")
     parser.add_argument("--grid-size", type=int, default=GRID_SIZE)
     parser.add_argument("--num-channels", type=int, default=NUM_CHANNELS)
     parser.add_argument("--num-kernels", type=int, default=NUM_KERNELS)
     parser.add_argument("--num-steps", type=int, default=NUM_STEPS)
-    parser.add_argument("--patch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=0.05)
-    parser.add_argument("--trials", type=int, default=3)
-    parser.add_argument("--steps-per-stage", type=int, default=100)
     parser.add_argument("--output", type=str, default="train/trained_kernels.bin")
+    parser.add_argument("--epochs", type=int, default=200,
+                        help="Number of training epochs")
+    parser.add_argument("--save-png", action="store_true",
+                        help="Save kernel visualizations as PNGs")
     args = parser.parse_args()
 
-    if args.eval:
-        run_eval(args)
-    else:
-        run_training(args)
+    run_train_glider(args)
 
 
 if __name__ == "__main__":

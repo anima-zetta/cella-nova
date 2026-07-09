@@ -1,7 +1,6 @@
 use lenia_ca::gpu_flow_lenia::{generate_flow_kernels, GpuFlowLenia};
 use lenia_ca::wfft::WgpuContext;
-use ndarray::Array2;
-use rand::Rng;
+use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::event::{Event, VirtualKeyCode, WindowEvent};
@@ -32,7 +31,6 @@ struct Params {
 
 @group(0) @binding(0) var<storage, read> channel: array<f32>;
 @group(0) @binding(1) var<uniform> params: Params;
-@group(0) @binding(2) var<storage, read> obstacle: array<f32>;
 
 @fragment
 fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
@@ -46,11 +44,6 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     let idx = row * params.grid_size + col;
-
-    // Obstacles render as dark red
-    if (obstacle[idx] > 0.5) {
-        return vec4<f32>(0.25, 0.05, 0.05, 1.0);
-    }
 
     // Read all 3 channels from packed buffer
     let total_pixels = params.grid_size * params.grid_size;
@@ -102,6 +95,65 @@ fn load_trained_kernels(game: &GpuFlowLenia, path: &str) {
         game.set_kernel(&kernel_data, k);
     }
     println!("Loaded {} kernels.", num_kernels);
+}
+
+// ---------------------------------------------------------------------------
+// Generate glider seed (matches Python's generate_initial_glider_seed)
+// ---------------------------------------------------------------------------
+#[derive(Deserialize)]
+struct ChannelConfig {
+    sigma: f64,
+    offset_x: f64,
+    offset_y: f64,
+}
+
+#[derive(Deserialize)]
+struct SeedConfig {
+    channels: Vec<ChannelConfig>,
+}
+
+/// Generate a 3-channel asymmetric Gaussian seed from seed/glider.json.
+fn generate_glider_seed(game: &GpuFlowLenia, size: usize) {
+    // Read seed config from JSON
+    let config_path = "seed/glider.json";
+    let config_str = std::fs::read_to_string(config_path).expect("Failed to read seed config");
+    let config: SeedConfig =
+        serde_json::from_str(&config_str).expect("Failed to parse seed config");
+
+    // linspace(-1, 1, size)
+    let coords: Vec<f64> = (0..size)
+        .map(|i| -1.0 + 2.0 * i as f64 / (size - 1) as f64)
+        .collect();
+
+    let num_ch = config.channels.len();
+    let mut ch_data: Vec<Vec<f64>> = (0..num_ch).map(|_| vec![0.0f64; size * size]).collect();
+
+    let mut mass = 0.0;
+    for iy in 0..size {
+        for ix in 0..size {
+            let gx = coords[ix];
+            let gy = coords[iy];
+            let idx = iy * size + ix;
+
+            for (c, ch_cfg) in config.channels.iter().enumerate() {
+                let dx = gx - ch_cfg.offset_x;
+                let dy = gy - ch_cfg.offset_y;
+                let val = (-(dx * dx + dy * dy) / (2.0 * ch_cfg.sigma * ch_cfg.sigma)).exp();
+                ch_data[c][idx] = val.clamp(0.0, 1.0);
+                if c == 0 {
+                    mass += val;
+                }
+            }
+        }
+    }
+
+    for (c, data) in ch_data.iter().enumerate() {
+        game.upload_channel(data, c);
+    }
+    println!(
+        "Generated glider seed from '{}': {}×{} grid, {} channels, mass(ch0)={:.1}",
+        config_path, size, size, num_ch, mass
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -191,16 +243,6 @@ fn main() {
                     },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
             ],
         });
 
@@ -263,13 +305,10 @@ fn main() {
         vec![5, 7, 8], // ch2: 1 from ch1 + 2 self
     ];
 
-    // Per-kernel growth parameters — tuned for glider formation.
-    // Classic Lenia uses growth around μ≈0.15–0.3 with small σ.
-    // Mix of positive (growth) and negative (inhibition) heights.
-    let mut rng = rand::thread_rng();
-    let kernel_m: Vec<f32> = vec![0.15, 0.12, 0.28, 0.18, 0.10, 0.30, 0.22, 0.14, 0.25];
-    let kernel_s: Vec<f32> = vec![0.02, 0.03, 0.015, 0.025, 0.02, 0.018, 0.022, 0.028, 0.02];
-    let kernel_h: Vec<f32> = vec![0.8, -0.3, 0.6, 0.5, -0.4, 0.7, 0.4, -0.25, 0.55];
+    // Growth parameters matching Python's FlowLeniaTorch: μ=0, σ=5, h=1
+    let kernel_m: Vec<f32> = vec![0.0; 9];
+    let kernel_s: Vec<f32> = vec![5.0; 9];
+    let kernel_h: Vec<f32> = vec![1.0; 9];
 
     let dt: f32 = 0.2;
     let dd: i32 = 5;
@@ -347,84 +386,8 @@ fn main() {
         }
     }
 
-    // Initialize all channels with random noise patches.
-    // All channels need initial activation for cross-talk to develop.
-    let patch_size = (global_r as f64 * 1.5) as usize;
-    let patch_half = patch_size / 2;
-    let glider_positions: [(usize, usize); 3] = [
-        (shape / 2, shape / 2),
-        (shape / 3, shape / 2),
-        (2 * shape / 3, shape / 2),
-    ];
-    for c in 0..num_channels {
-        let mut ch = Array2::<f64>::zeros([shape; 2]);
-        let (cx, cy) = glider_positions[c];
-        let x0 = cx.saturating_sub(patch_half);
-        let y0 = cy.saturating_sub(patch_half);
-        for dy in 0..patch_size {
-            for dx in 0..patch_size {
-                let px = x0 + dx;
-                let py = y0 + dy;
-                if px < shape && py < shape {
-                    ch[[py, px]] = rng.gen_range(0.0..1.0);
-                }
-            }
-        }
-        let flat: Vec<f64> = ch.iter().copied().collect();
-        let max_val = flat.iter().cloned().fold(0.0f64, f64::max);
-        println!("Channel {c}: max initial value = {max_val:.4}");
-        game.upload_channel(&flat, c);
-    }
-
-    // Initialize obstacles: vertical walls and scattered blocks (scaled for 256 grid)
-    {
-        let mut obstacles = vec![0.0f32; shape * shape];
-        // Vertical wall at x = shape/3
-        let wall_x = shape / 3;
-        for y in (shape / 8)..(7 * shape / 8) {
-            if y % 8 > 5 {
-                continue;
-            }
-            for dx in 0..2 {
-                let idx = y * shape + wall_x + dx;
-                if idx < obstacles.len() {
-                    obstacles[idx] = 1.0;
-                }
-            }
-        }
-        // Vertical wall at x = 2*shape/3
-        let wall_x2 = 2 * shape / 3;
-        for y in (shape / 8)..(7 * shape / 8) {
-            if y % 10 > 7 {
-                continue;
-            }
-            for dx in 0..2 {
-                let idx = y * shape + wall_x2 + dx;
-                if idx < obstacles.len() {
-                    obstacles[idx] = 1.0;
-                }
-            }
-        }
-        // Scattered obstacle disks
-        for _ in 0..8 {
-            let cx = rng.gen_range(shape / 6..5 * shape / 6);
-            let cy = rng.gen_range(shape / 6..5 * shape / 6);
-            let radius: i32 = rng.gen_range(2..6);
-            for dy in -radius..=radius {
-                for dx in -radius..=radius {
-                    if dx * dx + dy * dy > radius * radius {
-                        continue;
-                    }
-                    let px = (cx as i32 + dx) as usize;
-                    let py = (cy as i32 + dy) as usize;
-                    if px < shape && py < shape {
-                        obstacles[py * shape + px] = 1.0;
-                    }
-                }
-            }
-        }
-        game.upload_obstacles(&obstacles);
-    }
+    // Generate glider seed (matches Python's generate_initial_glider_seed)
+    generate_glider_seed(&game, shape);
 
     // --- Render bind group ---
     let render_bg = context
@@ -441,15 +404,10 @@ fn main() {
                     binding: 1,
                     resource: render_params_buf.as_entire_binding(),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: game.obstacle_buffer().as_entire_binding(),
-                },
             ],
         });
 
     // --- State ---
-    let mut paused = false;
     let mut last_fps_time = Instant::now();
     let mut frame_count: u32 = 0;
     let mut total_frames: u32 = 0;
@@ -471,9 +429,11 @@ fn main() {
     );
     println!("╠══════════════════════════════════════════════════════════╣");
     println!("║  Controls:                                              ║");
-    println!("║    [Space]     Pause/Resume simulation                 ║");
-    println!("║    [R]         Reset with new random state             ║");
+    println!("║    [R]         Reset glider seed                       ║");
     println!("║    [Q/Esc]     Quit                                    ║");
+    println!("╠══════════════════════════════════════════════════════════╣");
+    println!("║  CLI flags:                                             ║");
+    println!("║    --load-kernels <file>  Load trained kernels          ║");
     println!("╚══════════════════════════════════════════════════════════╝\n");
 
     event_loop.run(move |event, _, control_flow| {
@@ -498,42 +458,15 @@ fn main() {
                     },
                 ..
             } => match key {
-                VirtualKeyCode::Space => paused = !paused,
                 VirtualKeyCode::R => {
-                    let mut rng = rand::thread_rng();
-                    let patch_size = (global_r as f64 * 1.5) as usize;
-                    let patch_half = patch_size / 2;
-                    let glider_positions: [(usize, usize); 3] = [
-                        (shape / 2, shape / 2),
-                        (shape / 3, shape / 2),
-                        (2 * shape / 3, shape / 2),
-                    ];
-                    for c in 0..num_channels {
-                        let mut ch = Array2::<f64>::zeros([shape; 2]);
-                        let (cx, cy) = glider_positions[c];
-                        let x0 = cx.saturating_sub(patch_half);
-                        let y0 = cy.saturating_sub(patch_half);
-                        for dy in 0..patch_size {
-                            for dx in 0..patch_size {
-                                let px = x0 + dx;
-                                let py = y0 + dy;
-                                if px < shape && py < shape {
-                                    ch[[py, px]] = rng.gen_range(0.0..1.0);
-                                }
-                            }
-                        }
-                        let flat: Vec<f64> = ch.iter().copied().collect();
-                        game.upload_channel(&flat, c);
-                    }
+                    generate_glider_seed(&game, shape);
                 }
                 VirtualKeyCode::Q | VirtualKeyCode::Escape => *control_flow = ControlFlow::Exit,
                 _ => {}
             },
 
             Event::MainEventsCleared => {
-                if !paused {
-                    game.iterate();
-                }
+                game.iterate();
                 window.request_redraw();
             }
 
