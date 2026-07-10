@@ -26,10 +26,8 @@ use std::sync::{Arc, OnceLock};
 // WGSL shader sources (embedded as constants)
 // ---------------------------------------------------------------------------
 
-/// WGSL compute shader for bit-reversal permutation (batched, multi-lane).
-const BIT_REVERSE_SHADER: &str = include_str!("shaders/bit_reverse.wgsl");
-/// WGSL compute shader for a single FFT butterfly stage (batched, multi-lane).
-const FFT_STAGE_SHADER: &str = include_str!("shaders/fft_stage.wgsl");
+/// WGSL compute shader module (all compute entry points).
+const COMPUTE_SHADER: &str = include_str!("shaders/compute.wgsl");
 
 // ---------------------------------------------------------------------------
 // WgpuContext
@@ -147,14 +145,10 @@ impl WgpuFFT1D {
             mapped_at_creation: false,
         });
 
-        // --- Shader modules ---
-        let bit_rev_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("wfft::bit_reverse shader"),
-            source: wgpu::ShaderSource::Wgsl(BIT_REVERSE_SHADER.into()),
-        });
-        let fft_stage_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("wfft::fft_stage shader"),
-            source: wgpu::ShaderSource::Wgsl(FFT_STAGE_SHADER.into()),
+        // --- Shader module ---
+        let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wfft::compute shader"),
+            source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
         });
 
         // --- Bind group layouts ---
@@ -200,7 +194,7 @@ impl WgpuFFT1D {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 1,
+                        binding: 2,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -210,7 +204,7 @@ impl WgpuFFT1D {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 2,
+                        binding: 3,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -239,15 +233,15 @@ impl WgpuFFT1D {
         let bit_rev_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("wfft::bit_reverse pipeline"),
             layout: Some(&bit_rev_pipeline_layout),
-            module: &bit_rev_shader,
-            entry_point: "main",
+            module: &compute_shader,
+            entry_point: "bit_reverse_main",
         });
 
         let fft_stage_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("wfft::fft_stage pipeline"),
             layout: Some(&fft_pipeline_layout),
-            module: &fft_stage_shader,
-            entry_point: "main",
+            module: &compute_shader,
+            entry_point: "fft_stage_main",
         });
 
         // --- Compute pipelines ---
@@ -315,11 +309,11 @@ impl WgpuFFT1D {
                         resource: data_buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 1,
+                        binding: 2,
                         resource: self.twiddle_buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 2,
+                        binding: 3,
                         resource: self.params_buffer.as_entire_binding(),
                     },
                 ],
@@ -473,11 +467,11 @@ impl WgpuFFT1D {
                     resource: data_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
+                    binding: 2,
                     resource: self.twiddle_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: 3,
                     resource: self.params_buffer.as_entire_binding(),
                 },
             ],

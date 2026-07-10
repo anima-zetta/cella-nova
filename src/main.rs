@@ -77,9 +77,7 @@ fn load_seed(creature: &str) -> Vec<Vec<f64>> {
 // Render shaders
 // ---------------------------------------------------------------------------
 
-const RENDER_VERTEX_SHADER: &str = include_str!("shaders/render_vertex.wgsl");
-
-const RENDER_FRAGMENT_SHADER: &str = include_str!("shaders/render_fragment.wgsl");
+const RENDER_SHADER: &str = include_str!("shaders/render.wgsl");
 
 // ---------------------------------------------------------------------------
 // Main
@@ -144,17 +142,11 @@ fn main() {
     let context = Arc::new(WgpuContext::from_device(device, queue));
 
     // --- Render pipeline ---
-    let vertex_shader = context
+    let render_shader = context
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vertex shader"),
-            source: wgpu::ShaderSource::Wgsl(RENDER_VERTEX_SHADER.into()),
-        });
-    let fragment_shader = context
-        .device
-        .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("fragment shader"),
-            source: wgpu::ShaderSource::Wgsl(RENDER_FRAGMENT_SHADER.into()),
+            label: Some("render shader"),
+            source: wgpu::ShaderSource::Wgsl(RENDER_SHADER.into()),
         });
 
     let render_bgl = context
@@ -199,12 +191,12 @@ fn main() {
             label: Some("render pipeline"),
             layout: Some(&render_pl),
             vertex: wgpu::VertexState {
-                module: &vertex_shader,
+                module: &render_shader,
                 entry_point: "vs_main",
                 buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &fragment_shader,
+                module: &render_shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_config.format,

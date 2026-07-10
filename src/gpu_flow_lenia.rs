@@ -17,15 +17,11 @@ use std::sync::Arc;
 // WGSL shaders
 // ---------------------------------------------------------------------------
 
-const COPY_TO_CONV_SHADER: &str = include_str!("shaders/copy_to_conv.wgsl");
-const COMPLEX_MUL_SHADER: &str = include_str!("shaders/complex_mul.wgsl");
-const NORMALIZE_SHADER: &str = include_str!("shaders/normalize.wgsl");
-const GROWTH_FLOW_SHADER: &str = include_str!("shaders/growth_flow.wgsl");
-const CHANNEL_AGGREGATE_SHADER: &str = include_str!("shaders/channel_aggregate.wgsl");
-const SOBEL_SHADER: &str = include_str!("shaders/sobel.wgsl");
-const SUM_CHANNELS_SHADER: &str = include_str!("shaders/sum_channels.wgsl");
-const FLOW_FIELD_SHADER: &str = include_str!("shaders/flow_field.wgsl");
-const REINTEGRATION_SHADER: &str = include_str!("shaders/reintegration.wgsl");
+const COMPUTE_SHADER: &str = include_str!("shaders/compute.wgsl");
+
+/// Stride between per-kernel growth param slots in the GPU buffer.
+/// Must be at least `min_storage_buffer_offset_alignment` (256 on most devices).
+const GP_STRIDE: u64 = 256;
 
 // ---------------------------------------------------------------------------
 // GpuFlowLenia
@@ -58,12 +54,10 @@ pub struct GpuFlowLenia {
     new_channel_buffer: wgpu::Buffer,
     /// Working buffer for FFT: [X*Y] vec2<f32>
     conv_buffer: wgpu::Buffer,
-    /// Convolution real part per kernel: [K * X * Y] f32
-    conv_x_buffer: wgpu::Buffer,
+    /// Saved frequency-domain data for sharing forward FFTs across kernels.
+    conv_saved_buffer: wgpu::Buffer,
     /// All kernels packed: [X*Y*k] vec2<f32>
     kernel_buffer: wgpu::Buffer,
-    /// All growth results: [X*Y*k] f32
-    u_buffer: wgpu::Buffer,
 
     // FFT
     forward_fft_1d: Vec<WgpuFFT1D>,
@@ -72,8 +66,7 @@ pub struct GpuFlowLenia {
     // Pipelines
     copy_to_conv_pipeline: wgpu::ComputePipeline,
     complex_mul_pipeline: wgpu::ComputePipeline,
-    normalize_pipeline: wgpu::ComputePipeline,
-    growth_pipeline: wgpu::ComputePipeline,
+    normalize_growth_pipeline: wgpu::ComputePipeline,
     channel_aggregate_pipeline: wgpu::ComputePipeline,
     sobel_pipeline: wgpu::ComputePipeline,
     sum_channels_pipeline: wgpu::ComputePipeline,
@@ -83,10 +76,8 @@ pub struct GpuFlowLenia {
     // Bind group layouts (only those needed for per-kernel bind groups in iterate)
     copy_to_conv_bgl: wgpu::BindGroupLayout,
     complex_mul_bgl: wgpu::BindGroupLayout,
-    growth_bgl: wgpu::BindGroupLayout,
 
     // Cached bind groups (static bindings)
-    normalize_bg: wgpu::BindGroup,
     channel_aggregate_bg: wgpu::BindGroup,
     sobel_u_bg: wgpu::BindGroup,
     sobel_a_bg: wgpu::BindGroup,
@@ -94,7 +85,9 @@ pub struct GpuFlowLenia {
     flow_field_bg: wgpu::BindGroup,
     reintegration_bg: wgpu::BindGroup,
 
-    // Uniform buffers
+    // Per-kernel cached bind groups
+    normalize_growth_bgs: Vec<wgpu::BindGroup>,
+
     growth_params_buffer: wgpu::Buffer,
     reintegration_params_buffer: wgpu::Buffer,
 
@@ -169,6 +162,7 @@ impl GpuFlowLenia {
         let channel_buffer = make_storage("fl::channel", ch_size);
         let new_channel_buffer = make_storage("fl::new_channel", ch_size);
         let conv_buffer = make_storage("fl::conv", conv_buf_size);
+        let conv_saved_buffer = make_storage("fl::conv_saved", conv_buf_size);
 
         let k_size = (total_elements * num_kernels * 8) as u64;
         let kernel_buffer = make_storage("fl::kernel", k_size);
@@ -189,8 +183,22 @@ impl GpuFlowLenia {
         let flow_x_buffer = make_storage("fl::flow_x", uc_size);
         let flow_y_buffer = make_storage("fl::flow_y", uc_size);
 
-        // Uniform buffers
-        let growth_params_buffer = make_uniform("fl::growth_params", 12);
+        // Growth params buffer: per-kernel slots (storage, 256-byte aligned)
+        let growth_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fl::growth_params"),
+            size: (num_kernels as u64) * GP_STRIDE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Pre-write all kernel growth params
+        for k in 0..num_kernels {
+            let gp: [f32; 3] = [kernel_m[k], kernel_s[k], kernel_h[k]];
+            queue.write_buffer(
+                &growth_params_buffer,
+                (k as u64) * GP_STRIDE,
+                bytemuck::cast_slice(&gp),
+            );
+        }
         let normalize_params_buffer = make_uniform("fl::normalize_params", 4);
         let channel_aggregate_params_buffer = make_uniform("fl::ca_params", 12);
         let sobel_params_u_buffer = make_uniform("fl::sobel_u_params", 12);
@@ -224,23 +232,14 @@ impl GpuFlowLenia {
             mapped_at_creation: false,
         });
 
-        // --- Shader modules ---
-        let sm = |label: &str, src: &str| -> wgpu::ShaderModule {
+        // --- Shader module ---
+        let sm = |label: &str| -> wgpu::ShaderModule {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(src.into()),
+                source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
             })
         };
-
-        let copy_to_conv_sm = sm("fl::copy_to_conv", COPY_TO_CONV_SHADER);
-        let complex_mul_sm = sm("fl::complex_mul", COMPLEX_MUL_SHADER);
-        let normalize_sm = sm("fl::normalize", NORMALIZE_SHADER);
-        let growth_sm = sm("fl::growth", GROWTH_FLOW_SHADER);
-        let channel_aggregate_sm = sm("fl::channel_aggregate", CHANNEL_AGGREGATE_SHADER);
-        let sobel_sm = sm("fl::sobel", SOBEL_SHADER);
-        let sum_channels_sm = sm("fl::sum_channels", SUM_CHANNELS_SHADER);
-        let flow_field_sm = sm("fl::flow_field", FLOW_FIELD_SHADER);
-        let reintegration_sm = sm("fl::reintegration", REINTEGRATION_SHADER);
+        let compute_sm = sm("fl::compute");
 
         // --- Bind group layout helpers ---
         let sro = |b: u32| wgpu::BindGroupLayoutEntry {
@@ -276,49 +275,46 @@ impl GpuFlowLenia {
 
         let copy_to_conv_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::copy_to_conv bgl"),
-            entries: &[sro(0), srw(1)],
+            entries: &[sro(4), srw(5)],
         });
         let complex_mul_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::complex_mul bgl"),
-            entries: &[srw(0), sro(1)],
+            entries: &[srw(6), sro(7)],
         });
-        let normalize_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("fl::normalize bgl"),
-            entries: &[srw(0), unif(1)],
-        });
-        let growth_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("fl::growth bgl"),
-            entries: &[sro(0), srw(1), srw(2), unif(3)],
-        });
+        let normalize_growth_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("fl::normalize_growth bgl"),
+                entries: &[srw(8), srw(9), srw(10), unif(11), sro(12)],
+            });
         let channel_aggregate_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("fl::ca bgl"),
-                entries: &[sro(0), srw(1), sro(2), sro(3), unif(4)],
+                entries: &[sro(13), srw(14), sro(15), sro(16), unif(17)],
             });
         let sobel_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::sobel bgl"),
-            entries: &[sro(0), srw(1), srw(2), unif(3)],
+            entries: &[sro(21), srw(22), srw(23), unif(24)],
         });
         let sum_channels_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::sc bgl"),
-            entries: &[sro(0), srw(1), unif(2)],
+            entries: &[sro(18), srw(19), unif(20)],
         });
         let flow_field_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::ff bgl"),
             entries: &[
-                sro(0),
-                sro(1),
-                sro(2),
-                sro(3),
-                sro(4),
-                srw(5),
-                srw(6),
-                unif(7),
+                sro(25),
+                sro(26),
+                sro(27),
+                sro(28),
+                sro(29),
+                srw(30),
+                srw(31),
+                unif(32),
             ],
         });
         let reintegration_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::ri bgl"),
-            entries: &[sro(0), sro(1), sro(2), srw(3), unif(4)],
+            entries: &[sro(33), sro(34), sro(35), srw(36), unif(37)],
         });
 
         // --- Pipeline layouts & pipelines ---
@@ -331,48 +327,64 @@ impl GpuFlowLenia {
         };
         let cp = |label: &str,
                   layout: &wgpu::PipelineLayout,
-                  module: &wgpu::ShaderModule|
+                  module: &wgpu::ShaderModule,
+                  entry: &str|
          -> wgpu::ComputePipeline {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
                 module,
-                entry_point: "main",
+                entry_point: entry,
             })
         };
 
         let copy_to_conv_pipeline = cp(
             "fl::copy_to_conv",
             &pl("fl::copy_to_conv pl", &copy_to_conv_bgl),
-            &copy_to_conv_sm,
+            &compute_sm,
+            "copy_to_conv_main",
         );
         let complex_mul_pipeline = cp(
             "fl::complex_mul",
             &pl("fl::complex_mul pl", &complex_mul_bgl),
-            &complex_mul_sm,
+            &compute_sm,
+            "complex_mul_main",
         );
-        let normalize_pipeline = cp(
-            "fl::normalize",
-            &pl("fl::normalize pl", &normalize_bgl),
-            &normalize_sm,
+        let normalize_growth_pipeline = cp(
+            "fl::normalize_growth",
+            &pl("fl::normalize_growth pl", &normalize_growth_bgl),
+            &compute_sm,
+            "normalize_growth_main",
         );
-        let growth_pipeline = cp("fl::growth", &pl("fl::growth pl", &growth_bgl), &growth_sm);
         let channel_aggregate_pipeline = cp(
             "fl::ca",
             &pl("fl::ca pl", &channel_aggregate_bgl),
-            &channel_aggregate_sm,
+            &compute_sm,
+            "channel_aggregate_main",
         );
-        let sobel_pipeline = cp("fl::sobel", &pl("fl::sobel pl", &sobel_bgl), &sobel_sm);
+        let sobel_pipeline = cp(
+            "fl::sobel",
+            &pl("fl::sobel pl", &sobel_bgl),
+            &compute_sm,
+            "sobel_main",
+        );
         let sum_channels_pipeline = cp(
             "fl::sc",
             &pl("fl::sc pl", &sum_channels_bgl),
-            &sum_channels_sm,
+            &compute_sm,
+            "sum_channels_main",
         );
-        let flow_field_pipeline = cp("fl::ff", &pl("fl::ff pl", &flow_field_bgl), &flow_field_sm);
+        let flow_field_pipeline = cp(
+            "fl::ff",
+            &pl("fl::ff pl", &flow_field_bgl),
+            &compute_sm,
+            "flow_field_main",
+        );
         let reintegration_pipeline = cp(
             "fl::ri",
             &pl("fl::ri pl", &reintegration_bgl),
-            &reintegration_sm,
+            &compute_sm,
+            "reintegration_main",
         );
 
         // --- Write uniform params ---
@@ -423,43 +435,75 @@ impl GpuFlowLenia {
 
         // --- Write uniform params ---
         // --- Cached bind groups ---
-        let normalize_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fl::normalize bg"),
-            layout: &normalize_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: conv_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: normalize_params_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        // Per-kernel normalize+growth bind groups
+        let mut normalize_growth_bgs = Vec::with_capacity(num_kernels);
+        let gp_size = std::num::NonZeroU64::new(12);
+        for k in 0..num_kernels {
+            let u_offset = (k * total_elements * 4) as u64;
+            let u_size = std::num::NonZeroU64::new((total_elements * 4) as u64);
+
+            normalize_growth_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("fl::normalize_growth bg k={k}")),
+                layout: &normalize_growth_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: conv_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &u_buffer,
+                            offset: u_offset,
+                            size: u_size,
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &conv_x_buffer,
+                            offset: u_offset,
+                            size: u_size,
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: normalize_params_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &growth_params_buffer,
+                            offset: (k as u64) * GP_STRIDE,
+                            size: gp_size,
+                        }),
+                    },
+                ],
+            }));
+        }
 
         let channel_aggregate_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fl::ca bg"),
             layout: &channel_aggregate_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
-                    binding: 0,
+                    binding: 13,
                     resource: u_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
+                    binding: 14,
                     resource: u_channel_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: 15,
                     resource: c1_flat_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 3,
+                    binding: 16,
                     resource: c1_offsets_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: 17,
                     resource: channel_aggregate_params_buffer.as_entire_binding(),
                 },
             ],
@@ -470,19 +514,19 @@ impl GpuFlowLenia {
             layout: &sobel_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
-                    binding: 0,
+                    binding: 21,
                     resource: u_channel_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
+                    binding: 22,
                     resource: nabla_u_x_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: 23,
                     resource: nabla_u_y_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 3,
+                    binding: 24,
                     resource: sobel_params_u_buffer.as_entire_binding(),
                 },
             ],
@@ -493,19 +537,19 @@ impl GpuFlowLenia {
             layout: &sobel_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
-                    binding: 0,
+                    binding: 21,
                     resource: sum_a_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
+                    binding: 22,
                     resource: nabla_a_x_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: 23,
                     resource: nabla_a_y_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 3,
+                    binding: 24,
                     resource: sobel_params_a_buffer.as_entire_binding(),
                 },
             ],
@@ -516,15 +560,15 @@ impl GpuFlowLenia {
             layout: &sum_channels_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
-                    binding: 0,
+                    binding: 18,
                     resource: channel_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
+                    binding: 19,
                     resource: sum_a_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: 20,
                     resource: sum_channels_params_buffer.as_entire_binding(),
                 },
             ],
@@ -535,35 +579,35 @@ impl GpuFlowLenia {
             layout: &flow_field_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
-                    binding: 0,
+                    binding: 25,
                     resource: channel_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
+                    binding: 26,
                     resource: nabla_u_x_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: 27,
                     resource: nabla_u_y_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 3,
+                    binding: 28,
                     resource: nabla_a_x_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: 29,
                     resource: nabla_a_y_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 5,
+                    binding: 30,
                     resource: flow_x_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 6,
+                    binding: 31,
                     resource: flow_y_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 7,
+                    binding: 32,
                     resource: flow_field_params_buffer.as_entire_binding(),
                 },
             ],
@@ -574,23 +618,23 @@ impl GpuFlowLenia {
             layout: &reintegration_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
-                    binding: 0,
+                    binding: 33,
                     resource: channel_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
+                    binding: 34,
                     resource: flow_x_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: 35,
                     resource: flow_y_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 3,
+                    binding: 36,
                     resource: new_channel_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: 37,
                     resource: reintegration_params_buffer.as_entire_binding(),
                 },
             ],
@@ -614,15 +658,13 @@ impl GpuFlowLenia {
             channel_buffer,
             new_channel_buffer,
             conv_buffer,
+            conv_saved_buffer,
             kernel_buffer,
-            u_buffer,
-            conv_x_buffer,
             forward_fft_1d,
             inverse_fft_1d,
             copy_to_conv_pipeline,
             complex_mul_pipeline,
-            normalize_pipeline,
-            growth_pipeline,
+            normalize_growth_pipeline,
             channel_aggregate_pipeline,
             sobel_pipeline,
             sum_channels_pipeline,
@@ -630,8 +672,6 @@ impl GpuFlowLenia {
             reintegration_pipeline,
             copy_to_conv_bgl,
             complex_mul_bgl,
-            growth_bgl,
-            normalize_bg,
             channel_aggregate_bg,
             sobel_u_bg,
             sobel_a_bg,
@@ -639,6 +679,7 @@ impl GpuFlowLenia {
             flow_field_bg,
             reintegration_bg,
             growth_params_buffer,
+            normalize_growth_bgs,
             reintegration_params_buffer,
             readback_buffer,
         }
@@ -707,6 +748,12 @@ impl GpuFlowLenia {
         self.kernel_m[k] = m;
         self.kernel_s[k] = s;
         self.kernel_h[k] = h;
+        let gp: [f32; 3] = [m, s, h];
+        self.context.queue.write_buffer(
+            &self.growth_params_buffer,
+            (k as u64) * GP_STRIDE,
+            bytemuck::cast_slice(&gp),
+        );
     }
 
     /// Update all growth parameters at once.
@@ -714,6 +761,14 @@ impl GpuFlowLenia {
         self.kernel_m.copy_from_slice(m);
         self.kernel_s.copy_from_slice(s);
         self.kernel_h.copy_from_slice(h);
+        for k in 0..self.kernel_m.len() {
+            let gp: [f32; 3] = [m[k], s[k], h[k]];
+            self.context.queue.write_buffer(
+                &self.growth_params_buffer,
+                (k as u64) * GP_STRIDE,
+                bytemuck::cast_slice(&gp),
+            );
+        }
     }
 
     /// Run N iterations (forward pass).
@@ -880,100 +935,85 @@ impl GpuFlowLenia {
 
         // ================================================================
         // Phase 1: Per-kernel convolution + growth
+        //
+        // Group kernels by source channel to share forward FFTs:
+        //   FFT each unique channel once, save frequency-domain result,
+        //   then restore + multiply + IFFT for each kernel in the group.
         // ================================================================
+
+        // Build source-channel → kernel-indices mapping
+        let mut ch_to_kernels: Vec<Vec<usize>> = Vec::new();
+        ch_to_kernels.resize_with(self.num_channels, Vec::new);
         for k in 0..self.num_kernels {
-            let src_c = self.c0[k] as usize;
-            let ch_offset = (src_c * self.total_elements * 4) as u64;
-            let k_offset = (k * self.total_elements * 8) as u64;
-            let u_offset = (k * self.total_elements * 4) as u64;
-            let ch_size = std::num::NonZeroU64::new((self.total_elements * 4) as u64);
-            let k_size = std::num::NonZeroU64::new((self.total_elements * 8) as u64);
-            let u_size = std::num::NonZeroU64::new((self.total_elements * 4) as u64);
+            ch_to_kernels[self.c0[k] as usize].push(k);
+        }
 
-            // Create per-kernel bind groups
-            let copy_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("fl::copy_bg k={k}")),
-                layout: &self.copy_to_conv_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.channel_buffer,
-                            offset: ch_offset,
-                            size: ch_size,
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.conv_buffer.as_entire_binding(),
-                    },
-                ],
-            });
+        let conv_buf_size = (self.total_elements * 8) as u64;
 
-            let cmul_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("fl::cmul_bg k={k}")),
-                layout: &self.complex_mul_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.conv_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.kernel_buffer,
-                            offset: k_offset,
-                            size: k_size,
-                        }),
-                    },
-                ],
-            });
+        for kernels in &ch_to_kernels {
+            if kernels.is_empty() {
+                continue;
+            }
 
-            let grow_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("fl::grow_bg k={k}")),
-                layout: &self.growth_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.conv_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.u_buffer,
-                            offset: u_offset,
-                            size: u_size,
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.conv_x_buffer,
-                            offset: u_offset,
-                            size: u_size,
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.growth_params_buffer.as_entire_binding(),
-                    },
-                ],
-            });
+            // Create per-kernel bind groups for this group
+            let mut copy_bgs = Vec::with_capacity(kernels.len());
+            let mut cmul_bgs = Vec::with_capacity(kernels.len());
+            for &k in kernels {
+                let src_c = self.c0[k] as usize;
+                let ch_offset = (src_c * self.total_elements * 4) as u64;
+                let k_offset = (k * self.total_elements * 8) as u64;
+                let ch_size = std::num::NonZeroU64::new((self.total_elements * 4) as u64);
+                let k_size = std::num::NonZeroU64::new((self.total_elements * 8) as u64);
 
-            // Write growth params
-            let gp: [f32; 3] = [self.kernel_m[k], self.kernel_s[k], self.kernel_h[k]];
-            queue.write_buffer(&self.growth_params_buffer, 0, bytemuck::cast_slice(&gp));
+                copy_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("fl::copy_bg k={k}")),
+                    layout: &self.copy_to_conv_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &self.channel_buffer,
+                                offset: ch_offset,
+                                size: ch_size,
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.conv_buffer.as_entire_binding(),
+                        },
+                    ],
+                }));
+
+                cmul_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("fl::cmul_bg k={k}")),
+                    layout: &self.complex_mul_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self.conv_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &self.kernel_buffer,
+                                offset: k_offset,
+                                size: k_size,
+                            }),
+                        },
+                    ],
+                }));
+            }
 
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some(&format!("fl::conv_k{k}")),
+                label: Some("fl::phase1_group"),
             });
 
-            // Copy channel → conv
+            // Copy channel → conv (first kernel's source channel)
             self.dispatch_compute(
                 &mut encoder,
                 "copy",
                 &self.copy_to_conv_pipeline,
-                &copy_bg,
+                &copy_bgs[0],
                 wg,
             );
 
@@ -985,34 +1025,54 @@ impl GpuFlowLenia {
             let (br, fft) = fw_bgs[1];
             self.forward_fft_1d[1].record_transform(&mut encoder, lanes1, 1, axis0, br, fft);
 
-            // Complex multiply
-            self.dispatch_compute(
-                &mut encoder,
-                "cmul",
-                &self.complex_mul_pipeline,
-                &cmul_bg,
-                wg,
+            // Save frequency-domain data for reuse
+            encoder.copy_buffer_to_buffer(
+                &self.conv_buffer,
+                0,
+                &self.conv_saved_buffer,
+                0,
+                conv_buf_size,
             );
 
-            // Inverse FFT axis 1
-            let (br, fft) = inv_bgs[1];
-            self.inverse_fft_1d[1].record_transform(&mut encoder, lanes1, 1, axis0, br, fft);
+            for (i, k) in kernels.iter().enumerate() {
+                // Restore frequency-domain data (skip for first kernel, it's already there)
+                if i == 0 {
+                    continue;
+                };
+                encoder.copy_buffer_to_buffer(
+                    &self.conv_saved_buffer,
+                    0,
+                    &self.conv_buffer,
+                    0,
+                    conv_buf_size,
+                );
 
-            // Inverse FFT axis 0
-            let (br, fft) = inv_bgs[0];
-            self.inverse_fft_1d[0].record_transform(&mut encoder, lanes0, axis0, 1, br, fft);
+                // Complex multiply
+                self.dispatch_compute(
+                    &mut encoder,
+                    "cmul",
+                    &self.complex_mul_pipeline,
+                    &cmul_bgs[i],
+                    wg,
+                );
 
-            // Normalize
-            self.dispatch_compute(
-                &mut encoder,
-                "norm",
-                &self.normalize_pipeline,
-                &self.normalize_bg,
-                wg,
-            );
+                // Inverse FFT axis 1
+                let (br, fft) = inv_bgs[1];
+                self.inverse_fft_1d[1].record_transform(&mut encoder, lanes1, 1, axis0, br, fft);
 
-            // Growth
-            self.dispatch_compute(&mut encoder, "grow", &self.growth_pipeline, &grow_bg, wg);
+                // Inverse FFT axis 0
+                let (br, fft) = inv_bgs[0];
+                self.inverse_fft_1d[0].record_transform(&mut encoder, lanes0, axis0, 1, br, fft);
+
+                // Normalize + Growth (fused)
+                self.dispatch_compute(
+                    &mut encoder,
+                    "norm_grow",
+                    &self.normalize_growth_pipeline,
+                    &self.normalize_growth_bgs[*k],
+                    wg,
+                );
+            }
 
             queue.submit(Some(encoder.finish()));
         }
