@@ -3,7 +3,7 @@ use lenia_ca::wfft::WgpuContext;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
-use winit::event::{Event, VirtualKeyCode, WindowEvent};
+use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
@@ -71,33 +71,6 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 "#;
 
 // ---------------------------------------------------------------------------
-// Load trained kernels
-// ---------------------------------------------------------------------------
-/// Load trained kernel FFT weights from a binary file and upload to the simulation.
-fn load_trained_kernels(game: &GpuFlowLenia, path: &str) {
-    let data = std::fs::read(path).expect("Failed to load kernels file");
-    let header_bytes = 3 * 4; // 3 u32s
-    let header: &[u32] = bytemuck::cast_slice(&data[..header_bytes]);
-    let num_kernels = header[0] as usize;
-    let _grid_size = header[1] as usize;
-    let total = header[2] as usize;
-    let kernel_floats: &[f32] = bytemuck::cast_slice(&data[header_bytes..]);
-
-    println!("Loading {} kernels from '{}'...", num_kernels, path);
-    for k in 0..num_kernels {
-        let offset = k * total * 2;
-        let mut kernel_data: Vec<num_complex::Complex32> = Vec::with_capacity(total);
-        for i in 0..total {
-            let re = kernel_floats[offset + i * 2];
-            let im = kernel_floats[offset + i * 2 + 1];
-            kernel_data.push(num_complex::Complex32::new(re, im));
-        }
-        game.set_kernel(&kernel_data, k);
-    }
-    println!("Loaded {} kernels.", num_kernels);
-}
-
-// ---------------------------------------------------------------------------
 // Generate glider seed (matches Python's generate_initial_glider_seed)
 // ---------------------------------------------------------------------------
 #[derive(Deserialize)]
@@ -161,8 +134,6 @@ fn generate_glider_seed(game: &GpuFlowLenia, size: usize) {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
     // --- Interactive mode ---
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
@@ -171,6 +142,7 @@ fn main() {
             GRID_SIZE as f64,
             GRID_SIZE as f64,
         ))
+        .with_resizable(false)
         .build(&event_loop)
         .unwrap();
 
@@ -201,6 +173,23 @@ fn main() {
         .unwrap();
     surface_config.present_mode = wgpu::PresentMode::AutoVsync;
     surface.configure(&device, &surface_config);
+
+    // --- Render params ---
+    let render_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("render params"),
+        size: 12,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Write render params once (window is not resizable)
+    {
+        let mut data = Vec::with_capacity(12);
+        data.extend_from_slice(&(GRID_SIZE as u32).to_le_bytes());
+        data.extend_from_slice(&(surface_config.width as f32).to_le_bytes());
+        data.extend_from_slice(&(surface_config.height as f32).to_le_bytes());
+        queue.write_buffer(&render_params_buf, 0, &data);
+    }
 
     let context = Arc::new(WgpuContext::from_device(device, queue));
 
@@ -281,14 +270,6 @@ fn main() {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
-
-    // --- Render params ---
-    let render_params_buf = context.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("render params"),
-        size: 12,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
 
     // --- Flow Lenia setup ---
     let shape = GRID_SIZE.next_power_of_two();
@@ -377,15 +358,6 @@ fn main() {
         game.set_kernel(kfft, k);
     }
 
-    // Load trained kernels if requested
-    if let Some(pos) = args.iter().position(|a| a == "--load-kernels") {
-        if let Some(path) = args.get(pos + 1) {
-            load_trained_kernels(&game, path);
-        } else {
-            load_trained_kernels(&game, "trained_kernels.bin");
-        }
-    }
-
     // Generate glider seed (matches Python's generate_initial_glider_seed)
     generate_glider_seed(&game, shape);
 
@@ -410,31 +382,17 @@ fn main() {
     // --- State ---
     let mut last_fps_time = Instant::now();
     let mut frame_count: u32 = 0;
-    let mut total_frames: u32 = 0;
 
-    println!("\n╔══════════════════════════════════════════════════════════╗");
-    println!("║   🌊 Flow Lenia: GPU-Accelerated Mass-Conserving CA  🌊 ║");
-    println!("╠══════════════════════════════════════════════════════════╣");
+    println!("Flow Lenia: GPU-Accelerated Mass-Conserving CA");
     println!(
-        "║  {} channels, {} kernels, {}×{} grid                 ║",
+        "{} channels, {} kernels, {}×{} grid",
         num_channels, num_kernels, GRID_SIZE, GRID_SIZE
     );
+    println!("Reintegration tracking: dd={}, σ={}", dd, sigma);
     println!(
-        "║  Reintegration tracking: dd={}, σ={}                ║",
-        dd, sigma
-    );
-    println!(
-        "║  Metabolism: basal={}, kinetic={}            ║",
+        "Metabolism: basal={}, kinetic={}",
         basal_metabolic_rate, kinetic_cost
     );
-    println!("╠══════════════════════════════════════════════════════════╣");
-    println!("║  Controls:                                              ║");
-    println!("║    [R]         Reset glider seed                       ║");
-    println!("║    [Q/Esc]     Quit                                    ║");
-    println!("╠══════════════════════════════════════════════════════════╣");
-    println!("║  CLI flags:                                             ║");
-    println!("║    --load-kernels <file>  Load trained kernels          ║");
-    println!("╚══════════════════════════════════════════════════════════╝\n");
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -445,26 +403,6 @@ fn main() {
                 ..
             } => *control_flow = ControlFlow::Exit,
 
-            Event::WindowEvent {
-                event:
-                    WindowEvent::KeyboardInput {
-                        input:
-                            winit::event::KeyboardInput {
-                                virtual_keycode: Some(key),
-                                state: winit::event::ElementState::Pressed,
-                                ..
-                            },
-                        ..
-                    },
-                ..
-            } => match key {
-                VirtualKeyCode::R => {
-                    generate_glider_seed(&game, shape);
-                }
-                VirtualKeyCode::Q | VirtualKeyCode::Escape => *control_flow = ControlFlow::Exit,
-                _ => {}
-            },
-
             Event::MainEventsCleared => {
                 game.iterate();
                 window.request_redraw();
@@ -472,36 +410,7 @@ fn main() {
 
             Event::RedrawRequested(_) => {
                 // Debug: print channel stats + center of mass at key frames
-                let debug_frames = [10, 30, 60, 120];
-                if debug_frames.contains(&total_frames) {
-                    for c in 0..num_channels {
-                        let data = game.download_channel(c);
-                        let max_val = data.iter().cloned().fold(0.0f32, f32::max);
-                        let sum: f32 = data.iter().sum();
-                        let non_zero = data.iter().filter(|&&v| v > 0.001).count();
-                        // Center of mass
-                        let mut cx: f32 = 0.0;
-                        let mut cy: f32 = 0.0;
-                        for (i, &v) in data.iter().enumerate() {
-                            if v > 0.001 {
-                                let x = (i % shape) as f32;
-                                let y = (i / shape) as f32;
-                                cx += x * v;
-                                cy += y * v;
-                            }
-                        }
-                        if sum > 0.0 {
-                            cx /= sum;
-                            cy /= sum;
-                        }
-                        println!(
-                            "Frame {frame_count} ch{c}: max={max_val:.4}, sum={sum:.2}, non_zero={non_zero}/{}, com=({cx:.0},{cy:.0})",
-                            data.len()
-                        );
-                    }
-                }
                 frame_count += 1;
-                total_frames += 1;
                 let now = Instant::now();
                 let elapsed = now.duration_since(last_fps_time).as_secs_f64();
                 if elapsed >= 1.0 {
@@ -512,15 +421,6 @@ fn main() {
                     ));
                     last_fps_time = now;
                     frame_count = 0;
-                }
-
-                // Update render params
-                {
-                    let mut data = Vec::with_capacity(12);
-                    data.extend_from_slice(&(GRID_SIZE as u32).to_le_bytes());
-                    data.extend_from_slice(&(surface_config.width as f32).to_le_bytes());
-                    data.extend_from_slice(&(surface_config.height as f32).to_le_bytes());
-                    context.queue.write_buffer(&render_params_buf, 0, &data);
                 }
 
                 let frame = surface.get_current_texture().unwrap();
