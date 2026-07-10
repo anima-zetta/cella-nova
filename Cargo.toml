@@ -13,7 +13,6 @@ path = "src/main.rs"
 [dependencies]
 winit = "0.28"
 ndarray = "0.15.6"
-rustfft = "6.1.0"
 num-complex = "0.4.2"
 wgpu = "0.16"
 pollster = "0.4"

@@ -1,4 +1,4 @@
-use lenia_ca::gpu_flow_lenia::{generate_flow_kernels, GpuFlowLenia};
+use lenia_ca::gpu_flow_lenia::GpuFlowLenia;
 use lenia_ca::wfft::WgpuContext;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -8,6 +8,37 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
 const GRID_SIZE: usize = 512;
+
+// ---------------------------------------------------------------------------
+// Kernel loading
+// ---------------------------------------------------------------------------
+
+/// Load pre-computed FFT kernels from binary file.
+/// Format: for each kernel, `size * size` complex values as interleaved f32 (real, imag).
+fn load_kernels_fft(
+    path: &str,
+    num_kernels: usize,
+    size: usize,
+) -> Vec<Vec<num_complex::Complex32>> {
+    let data = std::fs::read(path).expect("Failed to read kernel FFT file");
+    let expected = num_kernels * size * size * 8;
+    assert_eq!(data.len(), expected, "Kernel FFT file size mismatch");
+
+    let mut kernels = Vec::with_capacity(num_kernels);
+    let kernel_len = size * size;
+    for k in 0..num_kernels {
+        let mut kernel = Vec::with_capacity(kernel_len);
+        let base = k * kernel_len * 8;
+        for i in 0..kernel_len {
+            let offset = base + i * 8;
+            let re = f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+            let im = f32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap());
+            kernel.push(num_complex::Complex32::new(re, im));
+        }
+        kernels.push(kernel);
+    }
+    kernels
+}
 
 // ---------------------------------------------------------------------------
 // Render shaders
@@ -261,46 +292,8 @@ fn main() {
         kinetic_cost,
     );
 
-    // Generate Flow Lenia kernels — Mexican-hat style for glider formation.
-    // Each kernel: positive center bump + negative ring = local excitation, global inhibition.
-    let global_r: f32 = 42.0; // characteristic scale for 512 grid
-    let radii: Vec<f32> = vec![0.8, 0.6, 1.0, 0.7, 0.5, 0.9, 0.65, 0.55, 0.85];
-    // a: bump positions (0=center, 1=edge). Center bump + ring bump.
-    let a: Vec<[f32; 3]> = vec![
-        [0.0, 0.6, 0.0],
-        [0.0, 0.5, 0.0],
-        [0.0, 0.7, 0.0],
-        [0.0, 0.55, 0.0],
-        [0.0, 0.45, 0.0],
-        [0.0, 0.65, 0.0],
-        [0.0, 0.5, 0.0],
-        [0.0, 0.6, 0.0],
-        [0.0, 0.55, 0.0],
-    ];
-    let w: Vec<[f32; 3]> = vec![
-        [0.08, 0.06, 0.01],
-        [0.07, 0.05, 0.01],
-        [0.09, 0.07, 0.01],
-        [0.08, 0.06, 0.01],
-        [0.07, 0.05, 0.01],
-        [0.09, 0.07, 0.01],
-        [0.08, 0.06, 0.01],
-        [0.07, 0.05, 0.01],
-        [0.08, 0.06, 0.01],
-    ];
-    let b: Vec<[f32; 3]> = vec![
-        [0.8, -0.3, 0.0],
-        [0.7, -0.25, 0.0],
-        [0.9, -0.35, 0.0],
-        [0.75, -0.3, 0.0],
-        [0.65, -0.2, 0.0],
-        [0.85, -0.35, 0.0],
-        [0.7, -0.25, 0.0],
-        [0.6, -0.2, 0.0],
-        [0.8, -0.3, 0.0],
-    ];
-
-    let kernels_fft = generate_flow_kernels(shape, global_r, &radii, &a, &w, &b);
+    // Load pre-computed kernels from file
+    let kernels_fft = load_kernels_fft("kernels/kernels_fft.bin", num_kernels, shape);
     for (k, kfft) in kernels_fft.iter().enumerate() {
         game.set_kernel(kfft, k);
     }
