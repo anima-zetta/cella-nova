@@ -20,7 +20,6 @@
 //! All lanes along an axis are processed in a single GPU pass (batched).
 
 use num_complex::Complex32;
-use rustfft::{Fft, FftDirection, FftPlanner};
 use std::sync::{Arc, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -28,100 +27,9 @@ use std::sync::{Arc, OnceLock};
 // ---------------------------------------------------------------------------
 
 /// WGSL compute shader for bit-reversal permutation (batched, multi-lane).
-const BIT_REVERSE_SHADER: &str = r#"
-@group(0) @binding(0) var<storage, read_write> data: array<vec2<f32>>;
-
-struct Params {
-    n: u32,
-    num_lanes: u32,
-    lane_stride: u32,
-    element_stride: u32,
-}
-@group(0) @binding(1) var<uniform> params: Params;
-
-fn bit_reverse(x: u32, bits: u32) -> u32 {
-    var result: u32 = 0u;
-    for (var i: u32 = 0u; i < bits; i = i + 1u) {
-        result = (result << 1u) | ((x >> i) & 1u);
-    }
-    return result;
-}
-
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let total: u32 = params.n * params.num_lanes;
-    let i: u32 = id.x;
-    if (i >= total) {
-        return;
-    }
-    let lane: u32 = i / params.n;
-    let offset_in_lane: u32 = i % params.n;
-    let bits: u32 = u32(log2(f32(params.n)));
-    let j: u32 = bit_reverse(offset_in_lane, bits);
-    if (offset_in_lane < j) {
-        let base: u32 = lane * params.lane_stride;
-        let a: u32 = base + offset_in_lane * params.element_stride;
-        let b: u32 = base + j * params.element_stride;
-        let tmp: vec2<f32> = data[a];
-        data[a] = data[b];
-        data[b] = tmp;
-    }
-}
-"#;
-
+const BIT_REVERSE_SHADER: &str = include_str!("shaders/bit_reverse.wgsl");
 /// WGSL compute shader for a single FFT butterfly stage (batched, multi-lane).
-const FFT_STAGE_SHADER: &str = r#"
-@group(0) @binding(0) var<storage, read_write> data: array<vec2<f32>>;
-@group(0) @binding(1) var<storage, read> twiddles: array<vec2<f32>>;
-
-struct Params {
-    n: u32,
-    stage: u32,
-    inverse: u32,
-    num_lanes: u32,
-    lane_stride: u32,
-    element_stride: u32,
-}
-@group(0) @binding(2) var<uniform> params: Params;
-
-fn complex_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(
-        a.x * b.x - a.y * b.y,
-        a.x * b.y + a.y * b.x,
-    );
-}
-
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let half_n: u32 = params.n / 2u;
-    let butterflies_per_lane: u32 = half_n;
-    let total_butterflies: u32 = butterflies_per_lane * params.num_lanes;
-    let i: u32 = id.x;
-    if (i >= total_butterflies) {
-        return;
-    }
-    let lane: u32 = i / butterflies_per_lane;
-    let butterfly: u32 = i % butterflies_per_lane;
-    let base: u32 = lane * params.lane_stride;
-    let es: u32 = params.element_stride;
-
-    let stride: u32 = 1u << params.stage;
-    let block_size: u32 = stride * 2u;
-    let block: u32 = butterfly / stride;
-    let offset: u32 = butterfly % stride;
-    let j: u32 = base + (block * block_size + offset) * es;
-    let k: u32 = j + stride * es;
-
-    let stage_offset: u32 = (1u << params.stage) - 1u;
-    let w: vec2<f32> = twiddles[stage_offset + offset];
-
-    let even: vec2<f32> = data[j];
-    let odd: vec2<f32> = complex_mul(w, data[k]);
-
-    data[j] = even + odd;
-    data[k] = even - odd;
-}
-"#;
+const FFT_STAGE_SHADER: &str = include_str!("shaders/fft_stage.wgsl");
 
 // ---------------------------------------------------------------------------
 // WgpuContext
@@ -186,12 +94,9 @@ pub fn global_context() -> Arc<WgpuContext> {
 /// Supports batched processing of multiple independent lanes in a single GPU pass.
 pub struct WgpuFFT1D {
     context: Arc<WgpuContext>,
-    n: usize,        // original size
-    padded_n: usize, // next power of two (used for GPU FFT; equals n if n is a power of two)
+    n: usize,
     inverse: bool,
     num_stages: u32,
-    // CPU fallback for non-power-of-two sizes
-    cpu_fft: Option<Arc<dyn Fft<f32>>>,
     // GPU resources
     twiddle_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
@@ -208,37 +113,21 @@ impl WgpuFFT1D {
     /// Creates a new 1D FFT plan.
     ///
     /// * `context` - Shared wgpu context.
-    /// * `n` - Length of the FFT. If not a power of two, the input will be
-    ///   zero-padded to the next power of two internally.
+    /// * `n` - Length of the FFT (must be a power of two).
     /// * `inverse` - If true, performs the inverse FFT.
     pub fn new(context: Arc<WgpuContext>, n: usize, inverse: bool) -> Self {
         assert!(n > 0, "WgpuFFT1D::new() - n must be > 0");
+        assert!(
+            n.is_power_of_two(),
+            "WgpuFFT1D::new() - n must be a power of two, got {}",
+            n
+        );
 
-        // Round up to the next power of two for the GPU FFT
-        let padded_n = n.next_power_of_two();
-        let use_gpu = n == padded_n;
-
-        // CPU fallback for non-power-of-two sizes
-        let cpu_fft = if use_gpu {
-            None
-        } else {
-            let mut planner = FftPlanner::new();
-            let direction = match inverse {
-                true => FftDirection::Inverse,
-                false => FftDirection::Forward,
-            };
-            Some(planner.plan_fft(n, direction))
-        };
-
-        let num_stages = if use_gpu {
-            (padded_n as f64).log2() as u32
-        } else {
-            0
-        };
+        let num_stages = (n as f64).log2() as u32;
         let device = &context.device;
 
         // --- Twiddle factors (precomputed on CPU) ---
-        let twiddles: Vec<[f32; 2]> = Self::compute_twiddle_factors(padded_n, inverse);
+        let twiddles: Vec<[f32; 2]> = Self::compute_twiddle_factors(n, inverse);
         let twiddle_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wfft::WgpuFFT1D twiddle buffer"),
             size: (twiddles.len() * 8) as u64,
@@ -365,10 +254,8 @@ impl WgpuFFT1D {
         WgpuFFT1D {
             context,
             n,
-            padded_n,
             inverse,
             num_stages,
-            cpu_fft,
             twiddle_buffer,
             params_buffer,
             bit_rev_pipeline,
@@ -387,7 +274,7 @@ impl WgpuFFT1D {
 
     /// Returns the padded length (next power of two) used for GPU FFT.
     pub fn padded_len(&self) -> usize {
-        self.padded_n
+        self.n
     }
 
     /// Returns whether this is an inverse FFT.
@@ -464,7 +351,7 @@ impl WgpuFFT1D {
 
         // Bit-reverse params (4 u32s)
         params_data.extend_from_slice(bytemuck::cast_slice(&[
-            self.padded_n as u32,
+            self.n as u32,
             num_lanes as u32,
             lane_stride,
             element_stride,
@@ -473,7 +360,7 @@ impl WgpuFFT1D {
         // Stage params (6 u32s each)
         for stage in 0..self.num_stages {
             params_data.extend_from_slice(bytemuck::cast_slice(&[
-                self.padded_n as u32,
+                self.n as u32,
                 stage,
                 if self.inverse { 1 } else { 0 },
                 num_lanes as u32,
@@ -499,7 +386,7 @@ impl WgpuFFT1D {
             });
             cp.set_pipeline(&self.bit_rev_pipeline);
             cp.set_bind_group(0, bit_rev_bg, &[]);
-            cp.dispatch_workgroups((self.padded_n as u32 * num_lanes as u32 + 255) / 256, 1, 1);
+            cp.dispatch_workgroups((self.n as u32 * num_lanes as u32 + 255) / 256, 1, 1);
         }
 
         // Butterfly stages: copy each stage's params, then dispatch
@@ -511,11 +398,7 @@ impl WgpuFFT1D {
             });
             cp.set_pipeline(&self.fft_stage_pipeline);
             cp.set_bind_group(0, fft_bg, &[]);
-            cp.dispatch_workgroups(
-                ((self.padded_n as u32 / 2) * num_lanes as u32 + 255) / 256,
-                1,
-                1,
-            );
+            cp.dispatch_workgroups(((self.n as u32 / 2) * num_lanes as u32 + 255) / 256, 1, 1);
         }
     }
 
@@ -528,7 +411,6 @@ impl WgpuFFT1D {
     ///
     /// `data` must have exactly `num_lanes * self.n` elements, laid out as
     /// `[lane_0, lane_1, ..., lane_{num_lanes-1}]` where each lane has `self.n` elements.
-    /// If `self.n` is not a power of two, each lane is zero-padded to `self.padded_n`.
     pub fn transform_batch(&self, data: &mut [Complex32], num_lanes: usize) {
         assert_eq!(
             data.len(),
@@ -539,54 +421,30 @@ impl WgpuFFT1D {
             self.n
         );
 
-        // CPU fallback for non-power-of-two sizes
-        if let Some(ref fft) = self.cpu_fft {
-            let mut scratch: Vec<Complex32> =
-                vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
-            for lane in 0..num_lanes {
-                let start = lane * self.n;
-                let mut lane_data: Vec<Complex32> = data[start..start + self.n].to_vec();
-                fft.process_with_scratch(&mut lane_data, &mut scratch);
-                if self.inverse {
-                    let inv = 1.0 / self.n as f32;
-                    for v in lane_data.iter_mut() {
-                        v.re *= inv;
-                        v.im *= inv;
-                    }
-                }
-                data[start..start + self.n].copy_from_slice(&lane_data);
-            }
-            return;
-        }
-
         let device = &self.context.device;
         let queue = &self.context.queue;
 
-        // Total padded buffer size
-        let total_padded = num_lanes * self.padded_n;
-        let padded_buf_size = (total_padded * 8) as u64;
+        let total = num_lanes * self.n;
+        let buf_size = (total * 8) as u64;
 
         // --- Create a GPU storage buffer ---
         let data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wfft::WgpuFFT1D data buffer"),
-            size: padded_buf_size,
+            size: buf_size,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
-        // Upload data: pad each lane with zeros if needed
+        // Upload data
         {
-            let mut flat: Vec<[f32; 2]> = Vec::with_capacity(total_padded);
+            let mut flat: Vec<[f32; 2]> = Vec::with_capacity(total);
             for lane in 0..num_lanes {
                 let start = lane * self.n;
                 for i in 0..self.n {
                     let c = data[start + i];
                     flat.push([c.re, c.im]);
-                }
-                for _ in self.n..self.padded_n {
-                    flat.push([0.0, 0.0]);
                 }
             }
             queue.write_buffer(&data_buffer, 0, bytemuck::cast_slice(&flat));
@@ -629,12 +487,7 @@ impl WgpuFFT1D {
 
         // --- Bit-reversal pass ---
         {
-            let params_data: [u32; 4] = [
-                self.padded_n as u32,
-                num_lanes as u32,
-                self.padded_n as u32,
-                1,
-            ];
+            let params_data: [u32; 4] = [self.n as u32, num_lanes as u32, self.n as u32, 1];
             queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&params_data));
 
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -645,7 +498,7 @@ impl WgpuFFT1D {
             });
             cpass.set_pipeline(&self.bit_rev_pipeline);
             cpass.set_bind_group(0, &bit_rev_bind_group, &[]);
-            let total_elements = self.padded_n as u32 * num_lanes as u32;
+            let total_elements = self.n as u32 * num_lanes as u32;
             let wg_count = (total_elements + 255) / 256;
             cpass.dispatch_workgroups(wg_count, 1, 1);
             drop(cpass);
@@ -655,11 +508,11 @@ impl WgpuFFT1D {
         // --- Butterfly stages ---
         for stage in 0..self.num_stages {
             let params_data: [u32; 6] = [
-                self.padded_n as u32,
+                self.n as u32,
                 stage,
                 if self.inverse { 1u32 } else { 0u32 },
                 num_lanes as u32,
-                self.padded_n as u32,
+                self.n as u32,
                 1,
             ];
             queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&params_data));
@@ -672,7 +525,7 @@ impl WgpuFFT1D {
             });
             cpass.set_pipeline(&self.fft_stage_pipeline);
             cpass.set_bind_group(0, &fft_bind_group, &[]);
-            let total_butterflies = (self.padded_n as u32 / 2) * num_lanes as u32;
+            let total_butterflies = (self.n as u32 / 2) * num_lanes as u32;
             let wg_count = (total_butterflies + 255) / 256;
             cpass.dispatch_workgroups(wg_count, 1, 1);
             drop(cpass);
@@ -682,7 +535,7 @@ impl WgpuFFT1D {
         // --- Create readback buffer (per-call, sized for the batch) ---
         let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wfft::readback buffer"),
-            size: padded_buf_size,
+            size: buf_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -692,11 +545,11 @@ impl WgpuFFT1D {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("wfft::readback encoder"),
             });
-            encoder.copy_buffer_to_buffer(&data_buffer, 0, &readback_buffer, 0, padded_buf_size);
+            encoder.copy_buffer_to_buffer(&data_buffer, 0, &readback_buffer, 0, buf_size);
             queue.submit(Some(encoder.finish()));
         }
 
-        // --- Read back results (only first n elements per lane) ---
+        // --- Read back results ---
         {
             let readback_slice = readback_buffer.slice(..);
             readback_slice.map_async(wgpu::MapMode::Read, |_| {});
@@ -705,20 +558,19 @@ impl WgpuFFT1D {
             let readback_view = readback_slice.get_mapped_range();
             let result_bytes: &[[f32; 2]] = bytemuck::cast_slice(&readback_view);
             for lane in 0..num_lanes {
-                let dst_start = lane * self.n;
-                let src_start = lane * self.padded_n;
+                let start = lane * self.n;
                 for i in 0..self.n {
-                    let val = result_bytes[src_start + i];
-                    data[dst_start + i] = Complex32::new(val[0], val[1]);
+                    let val = result_bytes[start + i];
+                    data[start + i] = Complex32::new(val[0], val[1]);
                 }
             }
             drop(readback_view);
             readback_buffer.unmap();
         }
 
-        // Normalize inverse FFT: divide by padded_n
+        // Normalize inverse FFT: divide by n
         if self.inverse {
-            let inv_n = 1.0 / self.padded_n as f32;
+            let inv_n = 1.0 / self.n as f32;
             for v in data.iter_mut() {
                 v.re *= inv_n;
                 v.im *= inv_n;
@@ -1026,38 +878,6 @@ mod tests {
                     mag
                 );
             }
-        }
-    }
-
-    #[test]
-    fn test_fft_non_power_of_two() {
-        let ctx = test_context();
-        let n = 300; // not a power of two
-
-        let original: Vec<Complex32> = (0..n)
-            .map(|i| {
-                let val = (2.0 * std::f32::consts::PI * i as f32 / 16.0).cos();
-                Complex32::new(val, 0.0)
-            })
-            .collect();
-
-        let mut data = original.clone();
-
-        let fft = WgpuFFT1D::new(Arc::clone(&ctx), n, false);
-        fft.transform(&mut data);
-
-        let ifft = WgpuFFT1D::new(Arc::clone(&ctx), n, true);
-        ifft.transform(&mut data);
-
-        for (a, b) in data.iter().zip(original.iter()) {
-            let diff = (a.re - b.re).abs();
-            assert!(
-                diff < 1e-2,
-                "Non-power-of-two roundtrip error too large: |{} - {}| = {}",
-                a.re,
-                b.re,
-                diff
-            );
         }
     }
 }
