@@ -401,29 +401,25 @@ impl GpuFlowLenia {
         queue.write_buffer(&sum_channels_params_buffer, 0, bytemuck::cast_slice(&sc));
 
         // flow_field_params: width(u32), num_channels(u32), num_channels_f32(f32)
-        {
-            let mut data = Vec::with_capacity(12);
-            data.extend_from_slice(&(shape[0] as u32).to_le_bytes());
-            data.extend_from_slice(&(num_channels as u32).to_le_bytes());
-            data.extend_from_slice(&(num_channels as f32).to_le_bytes());
-            queue.write_buffer(&flow_field_params_buffer, 0, &data);
-        }
+        let mut data = Vec::with_capacity(12);
+        data.extend_from_slice(&(shape[0] as u32).to_le_bytes());
+        data.extend_from_slice(&(num_channels as u32).to_le_bytes());
+        data.extend_from_slice(&(num_channels as f32).to_le_bytes());
+        queue.write_buffer(&flow_field_params_buffer, 0, &data);
 
         // reintegration_params: width(u32), height(u32), dd(i32), sigma(f32), dt(f32), num_channels(u32), ma(f32), basal_rate(f32), kinetic_cost(f32)
-        {
-            let ma = dd as f32 - sigma;
-            let mut data = Vec::with_capacity(36);
-            data.extend_from_slice(&(shape[0] as u32).to_le_bytes());
-            data.extend_from_slice(&(shape[1] as u32).to_le_bytes());
-            data.extend_from_slice(&(dd as i32).to_le_bytes());
-            data.extend_from_slice(&sigma.to_le_bytes());
-            data.extend_from_slice(&dt.to_le_bytes());
-            data.extend_from_slice(&(num_channels as u32).to_le_bytes());
-            data.extend_from_slice(&ma.to_le_bytes());
-            data.extend_from_slice(&basal_metabolic_rate.to_le_bytes());
-            data.extend_from_slice(&kinetic_cost.to_le_bytes());
-            queue.write_buffer(&reintegration_params_buffer, 0, &data);
-        }
+        let ma = dd as f32 - sigma;
+        let mut ri_data = Vec::with_capacity(36);
+        ri_data.extend_from_slice(&(shape[0] as u32).to_le_bytes());
+        ri_data.extend_from_slice(&(shape[1] as u32).to_le_bytes());
+        ri_data.extend_from_slice(&(dd as i32).to_le_bytes());
+        ri_data.extend_from_slice(&sigma.to_le_bytes());
+        ri_data.extend_from_slice(&dt.to_le_bytes());
+        ri_data.extend_from_slice(&(num_channels as u32).to_le_bytes());
+        ri_data.extend_from_slice(&ma.to_le_bytes());
+        ri_data.extend_from_slice(&basal_metabolic_rate.to_le_bytes());
+        ri_data.extend_from_slice(&kinetic_cost.to_le_bytes());
+        queue.write_buffer(&reintegration_params_buffer, 0, &ri_data);
 
         // --- Write uniform params ---
         // --- Cached bind groups ---
@@ -968,16 +964,12 @@ impl GpuFlowLenia {
             }
 
             // Forward FFT axis 0
-            {
-                let (br, fft) = fw_bgs[0];
-                self.forward_fft_1d[0].record_transform(&mut encoder, lanes0, axis0, 1, br, fft);
-            }
+            let (br, fft) = fw_bgs[0];
+            self.forward_fft_1d[0].record_transform(&mut encoder, lanes0, axis0, 1, br, fft);
 
             // Forward FFT axis 1
-            {
-                let (br, fft) = fw_bgs[1];
-                self.forward_fft_1d[1].record_transform(&mut encoder, lanes1, 1, axis0, br, fft);
-            }
+            let (br, fft) = fw_bgs[1];
+            self.forward_fft_1d[1].record_transform(&mut encoder, lanes1, 1, axis0, br, fft);
 
             // Complex multiply
             {
@@ -990,16 +982,12 @@ impl GpuFlowLenia {
             }
 
             // Inverse FFT axis 1
-            {
-                let (br, fft) = inv_bgs[1];
-                self.inverse_fft_1d[1].record_transform(&mut encoder, lanes1, 1, axis0, br, fft);
-            }
+            let (br, fft) = inv_bgs[1];
+            self.inverse_fft_1d[1].record_transform(&mut encoder, lanes1, 1, axis0, br, fft);
 
             // Inverse FFT axis 0
-            {
-                let (br, fft) = inv_bgs[0];
-                self.inverse_fft_1d[0].record_transform(&mut encoder, lanes0, axis0, 1, br, fft);
-            }
+            let (br, fft) = inv_bgs[0];
+            self.inverse_fft_1d[0].record_transform(&mut encoder, lanes0, axis0, 1, br, fft);
 
             // Normalize
             {
@@ -1027,86 +1015,82 @@ impl GpuFlowLenia {
         // ================================================================
         // Phase 2: Channel aggregation, gradients, flow, reintegration
         // ================================================================
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("fl::phase2"),
+        });
+
+        // Channel aggregate: u_buffer → u_channel_buffer
         {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("fl::phase2"),
-            });
-
-            // Channel aggregate: u_buffer → u_channel_buffer
-            {
-                let mut p =
-                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ca") });
-                p.set_pipeline(&self.channel_aggregate_pipeline);
-                p.set_bind_group(0, &self.channel_aggregate_bg, &[]);
-                p.dispatch_workgroups(wg_c, 1, 1);
-            }
-
-            // Sum channels: channel_buffer → sum_a_buffer
-            {
-                let mut p =
-                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("sc") });
-                p.set_pipeline(&self.sum_channels_pipeline);
-                p.set_bind_group(0, &self.sum_channels_bg, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
-
-            // Sobel U: u_channel_buffer → nabla_u_x, nabla_u_y
-            {
-                let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("sobel_u"),
-                });
-                p.set_pipeline(&self.sobel_pipeline);
-                p.set_bind_group(0, &self.sobel_u_bg, &[]);
-                p.dispatch_workgroups(wg_c, 1, 1);
-            }
-
-            // Sobel A: sum_a_buffer → nabla_a_x, nabla_a_y
-            {
-                let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("sobel_a"),
-                });
-                p.set_pipeline(&self.sobel_pipeline);
-                p.set_bind_group(0, &self.sobel_a_bg, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
-
-            // Flow field
-            {
-                let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("flow"),
-                });
-                p.set_pipeline(&self.flow_field_pipeline);
-                p.set_bind_group(0, &self.flow_field_bg, &[]);
-                p.dispatch_workgroups(wg_c, 1, 1);
-            }
-
-            // Reintegration tracking
-            {
-                let mut p =
-                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ri") });
-                p.set_pipeline(&self.reintegration_pipeline);
-                p.set_bind_group(0, &self.reintegration_bg, &[]);
-                p.dispatch_workgroups(wg_c, 1, 1);
-            }
-
-            queue.submit(Some(encoder.finish()));
+            let mut p =
+                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ca") });
+            p.set_pipeline(&self.channel_aggregate_pipeline);
+            p.set_bind_group(0, &self.channel_aggregate_bg, &[]);
+            p.dispatch_workgroups(wg_c, 1, 1);
         }
+
+        // Sum channels: channel_buffer → sum_a_buffer
+        {
+            let mut p =
+                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("sc") });
+            p.set_pipeline(&self.sum_channels_pipeline);
+            p.set_bind_group(0, &self.sum_channels_bg, &[]);
+            p.dispatch_workgroups(wg, 1, 1);
+        }
+
+        // Sobel U: u_channel_buffer → nabla_u_x, nabla_u_y
+        {
+            let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("sobel_u"),
+            });
+            p.set_pipeline(&self.sobel_pipeline);
+            p.set_bind_group(0, &self.sobel_u_bg, &[]);
+            p.dispatch_workgroups(wg_c, 1, 1);
+        }
+
+        // Sobel A: sum_a_buffer → nabla_a_x, nabla_a_y
+        {
+            let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("sobel_a"),
+            });
+            p.set_pipeline(&self.sobel_pipeline);
+            p.set_bind_group(0, &self.sobel_a_bg, &[]);
+            p.dispatch_workgroups(wg, 1, 1);
+        }
+
+        // Flow field
+        {
+            let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("flow"),
+            });
+            p.set_pipeline(&self.flow_field_pipeline);
+            p.set_bind_group(0, &self.flow_field_bg, &[]);
+            p.dispatch_workgroups(wg_c, 1, 1);
+        }
+
+        // Reintegration tracking
+        {
+            let mut p =
+                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ri") });
+            p.set_pipeline(&self.reintegration_pipeline);
+            p.set_bind_group(0, &self.reintegration_bg, &[]);
+            p.dispatch_workgroups(wg_c, 1, 1);
+        }
+
+        queue.submit(Some(encoder.finish()));
 
         // ================================================================
         // Phase 3: Swap new_channel → channel
         // ================================================================
-        {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("fl::swap"),
-            });
-            encoder.copy_buffer_to_buffer(
-                &self.new_channel_buffer,
-                0,
-                &self.channel_buffer,
-                0,
-                (self.total_elements * self.num_channels * 4) as u64,
-            );
-            queue.submit(Some(encoder.finish()));
-        }
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("fl::swap"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &self.new_channel_buffer,
+            0,
+            &self.channel_buffer,
+            0,
+            (self.total_elements * self.num_channels * 4) as u64,
+        );
+        queue.submit(Some(encoder.finish()));
     }
 }

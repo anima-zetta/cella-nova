@@ -41,71 +41,30 @@ fn load_kernels_fft(
 }
 
 // ---------------------------------------------------------------------------
+// Seed loading (pre-computed channels from seed/glider.json)
+// ---------------------------------------------------------------------------
+
+fn load_seed() -> Vec<Vec<f64>> {
+    #[derive(Deserialize)]
+    struct GliderConfig {
+        seed_channels: Vec<Vec<f64>>,
+    }
+
+    let config_str =
+        std::fs::read_to_string("seed/glider.json").expect("Failed to read seed/glider.json");
+    let config: GliderConfig =
+        serde_json::from_str(&config_str).expect("Failed to parse seed/glider.json");
+
+    config.seed_channels
+}
+
+// ---------------------------------------------------------------------------
 // Render shaders
 // ---------------------------------------------------------------------------
 
 const RENDER_VERTEX_SHADER: &str = include_str!("shaders/render_vertex.wgsl");
 
 const RENDER_FRAGMENT_SHADER: &str = include_str!("shaders/render_fragment.wgsl");
-
-// ---------------------------------------------------------------------------
-// Generate glider seed (matches Python's generate_initial_glider_seed)
-// ---------------------------------------------------------------------------
-#[derive(Deserialize)]
-struct ChannelConfig {
-    sigma: f64,
-    offset_x: f64,
-    offset_y: f64,
-}
-
-#[derive(Deserialize)]
-struct SeedConfig {
-    channels: Vec<ChannelConfig>,
-}
-
-/// Generate a 3-channel asymmetric Gaussian seed from seed/glider.json.
-fn generate_glider_seed(game: &GpuFlowLenia, size: usize) {
-    // Read seed config from JSON
-    let config_path = "seed/glider.json";
-    let config_str = std::fs::read_to_string(config_path).expect("Failed to read seed config");
-    let config: SeedConfig =
-        serde_json::from_str(&config_str).expect("Failed to parse seed config");
-
-    // linspace(-1, 1, size)
-    let coords: Vec<f64> = (0..size)
-        .map(|i| -1.0 + 2.0 * i as f64 / (size - 1) as f64)
-        .collect();
-
-    let num_ch = config.channels.len();
-    let mut ch_data: Vec<Vec<f64>> = (0..num_ch).map(|_| vec![0.0f64; size * size]).collect();
-
-    let mut mass = 0.0;
-    for iy in 0..size {
-        for ix in 0..size {
-            let gx = coords[ix];
-            let gy = coords[iy];
-            let idx = iy * size + ix;
-
-            for (c, ch_cfg) in config.channels.iter().enumerate() {
-                let dx = gx - ch_cfg.offset_x;
-                let dy = gy - ch_cfg.offset_y;
-                let val = (-(dx * dx + dy * dy) / (2.0 * ch_cfg.sigma * ch_cfg.sigma)).exp();
-                ch_data[c][idx] = val.clamp(0.0, 1.0);
-                if c == 0 {
-                    mass += val;
-                }
-            }
-        }
-    }
-
-    for (c, data) in ch_data.iter().enumerate() {
-        game.upload_channel(data, c);
-    }
-    println!(
-        "Generated glider seed from '{}': {}×{} grid, {} channels, mass(ch0)={:.1}",
-        config_path, size, size, num_ch, mass
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Main
@@ -161,13 +120,11 @@ fn main() {
     });
 
     // Write render params once (window is not resizable)
-    {
-        let mut data = Vec::with_capacity(12);
-        data.extend_from_slice(&(GRID_SIZE as u32).to_le_bytes());
-        data.extend_from_slice(&(surface_config.width as f32).to_le_bytes());
-        data.extend_from_slice(&(surface_config.height as f32).to_le_bytes());
-        queue.write_buffer(&render_params_buf, 0, &data);
-    }
+    let mut data = Vec::with_capacity(12);
+    data.extend_from_slice(&(GRID_SIZE as u32).to_le_bytes());
+    data.extend_from_slice(&(surface_config.width as f32).to_le_bytes());
+    data.extend_from_slice(&(surface_config.height as f32).to_le_bytes());
+    queue.write_buffer(&render_params_buf, 0, &data);
 
     let context = Arc::new(WgpuContext::from_device(device, queue));
 
@@ -293,13 +250,16 @@ fn main() {
     );
 
     // Load pre-computed kernels from file
-    let kernels_fft = load_kernels_fft("kernels/kernels_fft.bin", num_kernels, shape);
+    let kernels_fft = load_kernels_fft("kernels/glider.bin", num_kernels, shape);
     for (k, kfft) in kernels_fft.iter().enumerate() {
         game.set_kernel(kfft, k);
     }
 
-    // Generate glider seed (matches Python's generate_initial_glider_seed)
-    generate_glider_seed(&game, shape);
+    // Load pre-computed seed from seed/glider.json
+    let seed_channels = load_seed();
+    for (c, data) in seed_channels.iter().enumerate() {
+        game.upload_channel(data, c);
+    }
 
     // --- Render bind group ---
     let render_bg = context

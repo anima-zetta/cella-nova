@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Generate kernel configuration for Flow Lenia.
+Generate kernel and seed data for the glider creature.
 
 Creates:
-  kernels/glider.json       — generation parameters (global_r, radii, a, w, b)
-  kernels/kernels_fft.bin   — pre-computed FFT kernel weights (binary f32)
+  kernels/glider.bin   — the glider's FFT convolution kernels (its "genome")
+  seed/glider.json     — the glider's initial state (its "body")
 
 The Rust simulation loads both files instead of recomputing at startup.
 """
 
 import json
+import math
 import os
 import struct
 
@@ -18,11 +19,12 @@ import numpy.typing as npt
 
 GRID_SIZE: int = 512
 NUM_KERNELS: int = 9
+NUM_CHANNELS: int = 3
 
-GLOBAL_R: float = 42.0
-RADII: npt.NDArray[np.float64] = np.array([0.8, 0.6, 1.0, 0.7, 0.5, 0.9, 0.65, 0.55, 0.85])
+GLOBAL_R = 42.0
+RADII = np.array([0.8, 0.6, 1.0, 0.7, 0.5, 0.9, 0.65, 0.55, 0.85])
 
-A: npt.NDArray[np.float64] = np.array([
+A = np.array([
     [0.0, 0.6, 0.0],
     [0.0, 0.5, 0.0],
     [0.0, 0.7, 0.0],
@@ -34,7 +36,7 @@ A: npt.NDArray[np.float64] = np.array([
     [0.0, 0.55, 0.0],
 ])
 
-W: npt.NDArray[np.float64] = np.array([
+W = np.array([
     [0.08, 0.06, 0.01],
     [0.07, 0.05, 0.01],
     [0.09, 0.07, 0.01],
@@ -46,7 +48,7 @@ W: npt.NDArray[np.float64] = np.array([
     [0.08, 0.06, 0.01],
 ])
 
-B: npt.NDArray[np.float64] = np.array([
+B = np.array([
     [0.8, -0.3, 0.0],
     [0.7, -0.25, 0.0],
     [0.9, -0.35, 0.0],
@@ -57,6 +59,13 @@ B: npt.NDArray[np.float64] = np.array([
     [0.6, -0.2, 0.0],
     [0.8, -0.3, 0.0],
 ])
+
+# Seed channel config (matches seed/glider.json)
+SEED_CHANNELS = [
+    {"sigma": 0.25, "offset_x": 0.0, "offset_y": 0.0},
+    {"sigma": 0.22, "offset_x": 0.04, "offset_y": 0.0},
+    {"sigma": 0.28, "offset_x": 0.0, "offset_y": 0.04},
+]
 
 
 def generate_kernels_fft() -> list[npt.NDArray[np.complex64]]:
@@ -91,6 +100,26 @@ def generate_kernels_fft() -> list[npt.NDArray[np.complex64]]:
     return all_kernels
 
 
+def generate_seed_channels() -> list[list[float]]:
+    """Generate 3-channel Gaussian seed matching generate_glider_seed() in Rust."""
+    size = GRID_SIZE
+    coords = [(-1.0 + 2.0 * i / (size - 1)) for i in range(size)]
+    channels: list[list[float]] = [[0.0] * (size * size) for _ in range(NUM_CHANNELS)]
+
+    for iy in range(size):
+        for ix in range(size):
+            gx = coords[ix]
+            gy = coords[iy]
+            idx = iy * size + ix
+            for c, ch in enumerate(SEED_CHANNELS):
+                dx = gx - ch["offset_x"]
+                dy = gy - ch["offset_y"]
+                val = math.exp(-(dx * dx + dy * dy) / (2.0 * ch["sigma"] * ch["sigma"]))
+                channels[c][idx] = max(0.0, min(1.0, val))
+
+    return channels
+
+
 def save_kernels_bin(kernels: list[npt.NDArray[np.complex64]], path: str) -> None:
     """Save FFT kernels as raw f32 interleaved real/imag pairs."""
     with open(path, "wb") as f:
@@ -107,24 +136,25 @@ def main() -> None:
     kernels: list[npt.NDArray[np.complex64]] = generate_kernels_fft()
     print(f"Done. Each kernel: {GRID_SIZE}x{GRID_SIZE} complex64")
 
+    print(f"Generating {NUM_CHANNELS} seed channels...")
+    seed_channels: list[list[float]] = generate_seed_channels()
+    print(f"Done. Each channel: {GRID_SIZE}x{GRID_SIZE} f64")
+
     os.makedirs("kernels", exist_ok=True)
 
-    # Save parameters as JSON
+    # Save seed channels as JSON
     params: dict[str, object] = {
         "grid_size": GRID_SIZE,
-        "num_kernels": NUM_KERNELS,
-        "global_r": GLOBAL_R,
-        "radii": RADII.tolist(),
-        "a": A.tolist(),
-        "w": W.tolist(),
-        "b": B.tolist(),
+        "num_channels": NUM_CHANNELS,
+        "seed_channels": seed_channels,
     }
-    with open("kernels/glider.json", "w") as f:
+    os.makedirs("seed", exist_ok=True)
+    with open("seed/glider.json", "w") as f:
         json.dump(params, f, indent=2)
-    print("Saved parameters to kernels/glider.json")
+    print("Saved seed channels to seed/glider.json")
 
     # Save FFT data as binary
-    save_kernels_bin(kernels, "kernels/kernels_fft.bin")
+    save_kernels_bin(kernels, "kernels/glider.bin")
 
 
 if __name__ == "__main__":

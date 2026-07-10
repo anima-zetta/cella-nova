@@ -438,17 +438,15 @@ impl WgpuFFT1D {
         });
 
         // Upload data
-        {
-            let mut flat: Vec<[f32; 2]> = Vec::with_capacity(total);
-            for lane in 0..num_lanes {
-                let start = lane * self.n;
-                for i in 0..self.n {
-                    let c = data[start + i];
-                    flat.push([c.re, c.im]);
-                }
+        let mut flat: Vec<[f32; 2]> = Vec::with_capacity(total);
+        for lane in 0..num_lanes {
+            let start = lane * self.n;
+            for i in 0..self.n {
+                let c = data[start + i];
+                flat.push([c.re, c.im]);
             }
-            queue.write_buffer(&data_buffer, 0, bytemuck::cast_slice(&flat));
         }
+        queue.write_buffer(&data_buffer, 0, bytemuck::cast_slice(&flat));
 
         // --- Create bind groups ---
         let bit_rev_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -486,13 +484,13 @@ impl WgpuFFT1D {
         });
 
         // --- Bit-reversal pass ---
-        {
-            let params_data: [u32; 4] = [self.n as u32, num_lanes as u32, self.n as u32, 1];
-            queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&params_data));
+        let params_data: [u32; 4] = [self.n as u32, num_lanes as u32, self.n as u32, 1];
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&params_data));
 
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("wfft::bit_rev encoder"),
-            });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("wfft::bit_rev encoder"),
+        });
+        {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("wfft::bit_reverse pass"),
             });
@@ -501,9 +499,8 @@ impl WgpuFFT1D {
             let total_elements = self.n as u32 * num_lanes as u32;
             let wg_count = (total_elements + 255) / 256;
             cpass.dispatch_workgroups(wg_count, 1, 1);
-            drop(cpass);
-            queue.submit(Some(encoder.finish()));
         }
+        queue.submit(Some(encoder.finish()));
 
         // --- Butterfly stages ---
         for stage in 0..self.num_stages {
@@ -541,32 +538,28 @@ impl WgpuFFT1D {
         });
 
         // --- Copy result back to readback buffer ---
-        {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("wfft::readback encoder"),
-            });
-            encoder.copy_buffer_to_buffer(&data_buffer, 0, &readback_buffer, 0, buf_size);
-            queue.submit(Some(encoder.finish()));
-        }
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("wfft::readback encoder"),
+        });
+        encoder.copy_buffer_to_buffer(&data_buffer, 0, &readback_buffer, 0, buf_size);
+        queue.submit(Some(encoder.finish()));
 
         // --- Read back results ---
-        {
-            let readback_slice = readback_buffer.slice(..);
-            readback_slice.map_async(wgpu::MapMode::Read, |_| {});
-            device.poll(wgpu::Maintain::Wait);
+        let readback_slice = readback_buffer.slice(..);
+        readback_slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
 
-            let readback_view = readback_slice.get_mapped_range();
-            let result_bytes: &[[f32; 2]] = bytemuck::cast_slice(&readback_view);
-            for lane in 0..num_lanes {
-                let start = lane * self.n;
-                for i in 0..self.n {
-                    let val = result_bytes[start + i];
-                    data[start + i] = Complex32::new(val[0], val[1]);
-                }
+        let readback_view = readback_slice.get_mapped_range();
+        let result_bytes: &[[f32; 2]] = bytemuck::cast_slice(&readback_view);
+        for lane in 0..num_lanes {
+            let start = lane * self.n;
+            for i in 0..self.n {
+                let val = result_bytes[start + i];
+                data[start + i] = Complex32::new(val[0], val[1]);
             }
-            drop(readback_view);
-            readback_buffer.unmap();
         }
+        drop(readback_view);
+        readback_buffer.unmap();
 
         // Normalize inverse FFT: divide by n
         if self.inverse {
