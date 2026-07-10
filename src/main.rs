@@ -10,6 +10,21 @@ use winit::window::WindowBuilder;
 const GRID_SIZE: usize = 512;
 
 // ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+fn creature_name() -> String {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--creature") {
+        args.get(pos + 1)
+            .cloned()
+            .unwrap_or_else(|| "glider".to_string())
+    } else {
+        "glider".to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Kernel loading
 // ---------------------------------------------------------------------------
 
@@ -44,16 +59,16 @@ fn load_kernels_fft(
 // Seed loading (pre-computed channels from seed/glider.json)
 // ---------------------------------------------------------------------------
 
-fn load_seed() -> Vec<Vec<f64>> {
+fn load_seed(creature: &str) -> Vec<Vec<f64>> {
     #[derive(Deserialize)]
     struct GliderConfig {
         seed_channels: Vec<Vec<f64>>,
     }
 
-    let config_str =
-        std::fs::read_to_string("seed/glider.json").expect("Failed to read seed/glider.json");
+    let path = format!("seed/{}.json", creature);
+    let config_str = std::fs::read_to_string(&path).expect(&format!("Failed to read {}", path));
     let config: GliderConfig =
-        serde_json::from_str(&config_str).expect("Failed to parse seed/glider.json");
+        serde_json::from_str(&config_str).expect(&format!("Failed to parse {}", path));
 
     config.seed_channels
 }
@@ -249,14 +264,18 @@ fn main() {
         kinetic_cost,
     );
 
+    let creature = creature_name();
+    println!("Creature: {}", creature);
+
     // Load pre-computed kernels from file
-    let kernels_fft = load_kernels_fft("kernels/glider.bin", num_kernels, shape);
+    let kernel_path = format!("kernels/{}.bin", creature);
+    let kernels_fft = load_kernels_fft(&kernel_path, num_kernels, shape);
     for (k, kfft) in kernels_fft.iter().enumerate() {
         game.set_kernel(kfft, k);
     }
 
-    // Load pre-computed seed from seed/glider.json
-    let seed_channels = load_seed();
+    // Load pre-computed seed
+    let seed_channels = load_seed(&creature);
     for (c, data) in seed_channels.iter().enumerate() {
         game.upload_channel(data, c);
     }
