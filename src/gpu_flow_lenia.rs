@@ -31,7 +31,6 @@ const REINTEGRATION_SHADER: &str = include_str!("shaders/reintegration.wgsl");
 // GpuFlowLenia
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub struct GpuFlowLenia {
     context: Arc<WgpuContext>,
     shape: Vec<usize>,
@@ -46,8 +45,6 @@ pub struct GpuFlowLenia {
 
     // Channel mapping
     c0: Vec<u32>,
-    c1_flat: Vec<u32>,
-    c1_offsets: Vec<u32>,
 
     // Per-kernel growth params
     kernel_m: Vec<f32>,
@@ -67,19 +64,6 @@ pub struct GpuFlowLenia {
     kernel_buffer: wgpu::Buffer,
     /// All growth results: [X*Y*k] f32
     u_buffer: wgpu::Buffer,
-    /// Aggregated per channel: [X*Y*C] f32
-    u_channel_buffer: wgpu::Buffer,
-    /// Gradient of U: [X*Y*C] f32 each
-    nabla_u_x_buffer: wgpu::Buffer,
-    nabla_u_y_buffer: wgpu::Buffer,
-    /// Gradient of sum(A): [X*Y] f32 each
-    nabla_a_x_buffer: wgpu::Buffer,
-    nabla_a_y_buffer: wgpu::Buffer,
-    /// Sum of all channels: [X*Y] f32
-    sum_a_buffer: wgpu::Buffer,
-    /// Flow field: [X*Y*C] f32 each
-    flow_x_buffer: wgpu::Buffer,
-    flow_y_buffer: wgpu::Buffer,
 
     // FFT
     forward_fft_1d: Vec<WgpuFFT1D>,
@@ -96,16 +80,10 @@ pub struct GpuFlowLenia {
     flow_field_pipeline: wgpu::ComputePipeline,
     reintegration_pipeline: wgpu::ComputePipeline,
 
-    // Bind group layouts
+    // Bind group layouts (only those needed for per-kernel bind groups in iterate)
     copy_to_conv_bgl: wgpu::BindGroupLayout,
     complex_mul_bgl: wgpu::BindGroupLayout,
-    normalize_bgl: wgpu::BindGroupLayout,
     growth_bgl: wgpu::BindGroupLayout,
-    channel_aggregate_bgl: wgpu::BindGroupLayout,
-    sobel_bgl: wgpu::BindGroupLayout,
-    sum_channels_bgl: wgpu::BindGroupLayout,
-    flow_field_bgl: wgpu::BindGroupLayout,
-    reintegration_bgl: wgpu::BindGroupLayout,
 
     // Cached bind groups (static bindings)
     normalize_bg: wgpu::BindGroup,
@@ -118,17 +96,7 @@ pub struct GpuFlowLenia {
 
     // Uniform buffers
     growth_params_buffer: wgpu::Buffer,
-    normalize_params_buffer: wgpu::Buffer,
-    channel_aggregate_params_buffer: wgpu::Buffer,
-    sobel_params_u_buffer: wgpu::Buffer,
-    sobel_params_a_buffer: wgpu::Buffer,
-    sum_channels_params_buffer: wgpu::Buffer,
-    flow_field_params_buffer: wgpu::Buffer,
     reintegration_params_buffer: wgpu::Buffer,
-
-    // Mapping buffers
-    c1_flat_buffer: wgpu::Buffer,
-    c1_offsets_buffer: wgpu::Buffer,
 
     // Readback
     readback_buffer: wgpu::Buffer,
@@ -644,8 +612,6 @@ impl GpuFlowLenia {
             basal_metabolic_rate,
             kinetic_cost,
             c0: c0.to_vec(),
-            c1_flat,
-            c1_offsets,
             kernel_m: kernel_m.to_vec(),
             kernel_s: kernel_s.to_vec(),
             kernel_h: kernel_h.to_vec(),
@@ -655,14 +621,6 @@ impl GpuFlowLenia {
             kernel_buffer,
             u_buffer,
             conv_x_buffer,
-            u_channel_buffer,
-            nabla_u_x_buffer,
-            nabla_u_y_buffer,
-            nabla_a_x_buffer,
-            nabla_a_y_buffer,
-            sum_a_buffer,
-            flow_x_buffer,
-            flow_y_buffer,
             forward_fft_1d,
             inverse_fft_1d,
             copy_to_conv_pipeline,
@@ -676,13 +634,7 @@ impl GpuFlowLenia {
             reintegration_pipeline,
             copy_to_conv_bgl,
             complex_mul_bgl,
-            normalize_bgl,
             growth_bgl,
-            channel_aggregate_bgl,
-            sobel_bgl,
-            sum_channels_bgl,
-            flow_field_bgl,
-            reintegration_bgl,
             normalize_bg,
             channel_aggregate_bg,
             sobel_u_bg,
@@ -691,15 +643,7 @@ impl GpuFlowLenia {
             flow_field_bg,
             reintegration_bg,
             growth_params_buffer,
-            normalize_params_buffer,
-            channel_aggregate_params_buffer,
-            sobel_params_u_buffer,
-            sobel_params_a_buffer,
-            sum_channels_params_buffer,
-            flow_field_params_buffer,
             reintegration_params_buffer,
-            c1_flat_buffer,
-            c1_offsets_buffer,
             readback_buffer,
         }
     }
