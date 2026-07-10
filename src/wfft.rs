@@ -660,6 +660,25 @@ impl WgpuFFTND {
     ///
     /// All lanes along each axis are processed in a single batched GPU pass.
     pub fn transform(&self, data: &mut ndarray::ArrayD<Complex32>) {
+        self.transform_impl(data, |c| *c, |c, val| *c = val);
+    }
+
+    /// Transforms `Complex<f64>` data in-place, converting to/from `f32` for the GPU.
+    ///
+    /// All lanes along each axis are processed in a single batched GPU pass.
+    pub fn transform_f64(&self, data: &mut ndarray::ArrayD<num_complex::Complex<f64>>) {
+        self.transform_impl(
+            data,
+            |c| Complex32::new(c.re as f32, c.im as f32),
+            |c, val| *c = num_complex::Complex::new(val.re as f64, val.im as f64),
+        );
+    }
+
+    fn transform_impl<T, F1, F2>(&self, data: &mut ndarray::ArrayD<T>, flatten: F1, scatter: F2)
+    where
+        F1: Fn(&T) -> Complex32,
+        F2: Fn(&mut T, Complex32),
+    {
         assert_eq!(
             data.shape(),
             &self.shape[..],
@@ -680,7 +699,7 @@ impl WgpuFFTND {
             let mut flat: Vec<Complex32> = Vec::with_capacity(data.len());
             for lane in data.lanes(ndarray::Axis(axis)) {
                 for c in lane.iter() {
-                    flat.push(*c);
+                    flat.push(flatten(c));
                 }
             }
 
@@ -690,54 +709,7 @@ impl WgpuFFTND {
             {
                 let start = lane_idx * axis_len;
                 for (i, c) in lane.iter_mut().enumerate() {
-                    *c = flat[start + i];
-                }
-            }
-        }
-    }
-
-    /// Transforms `Complex<f64>` data in-place, converting to/from `f32` for the GPU.
-    ///
-    /// All lanes along each axis are processed in a single batched GPU pass.
-    pub fn transform_f64(&self, data: &mut ndarray::ArrayD<num_complex::Complex<f64>>) {
-        assert_eq!(
-            data.shape(),
-            &self.shape[..],
-            "WgpuFFTND::transform_f64() - data shape mismatch"
-        );
-
-        let axis_order: Vec<usize> = if self.inverse {
-            (0..self.shape.len()).rev().collect()
-        } else {
-            (0..self.shape.len()).collect()
-        };
-
-        for &axis in &axis_order {
-            let fft_1d = &self.fft_1d_instances[axis];
-            let axis_len = self.shape[axis];
-
-            // Number of lanes along this axis = total_elements / axis_len
-            let num_lanes = data.len() / axis_len;
-
-            // Collect all lanes into a single flat buffer
-            // Each lane is a 1D slice along `axis`
-            let mut flat: Vec<Complex32> = Vec::with_capacity(data.len());
-            for lane in data.lanes(ndarray::Axis(axis)) {
-                for c in lane.iter() {
-                    flat.push(Complex32::new(c.re as f32, c.im as f32));
-                }
-            }
-
-            // Transform all lanes in a single batched GPU pass
-            fft_1d.transform_batch(&mut flat, num_lanes);
-
-            // Scatter back
-            for (lane_idx, mut lane) in data.lanes_mut(ndarray::Axis(axis)).into_iter().enumerate()
-            {
-                let start = lane_idx * axis_len;
-                for (i, c) in lane.iter_mut().enumerate() {
-                    let val = flat[start + i];
-                    *c = num_complex::Complex::new(val.re as f64, val.im as f64);
+                    scatter(c, flat[start + i]);
                 }
             }
         }

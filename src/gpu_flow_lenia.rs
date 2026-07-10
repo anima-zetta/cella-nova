@@ -841,6 +841,21 @@ impl GpuFlowLenia {
 
     // --- Main iteration ---
 
+    /// Helper: begin a compute pass, set pipeline + bind group, dispatch.
+    fn dispatch_compute(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        label: &str,
+        pipeline: &wgpu::ComputePipeline,
+        bind_group: &wgpu::BindGroup,
+        wg_count: u32,
+    ) {
+        let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label) });
+        p.set_pipeline(pipeline);
+        p.set_bind_group(0, bind_group, &[]);
+        p.dispatch_workgroups(wg_count, 1, 1);
+    }
+
     /// Performs a single Flow Lenia iteration entirely on the GPU.
     pub fn iterate(&self) {
         let device = &self.context.device;
@@ -954,14 +969,13 @@ impl GpuFlowLenia {
             });
 
             // Copy channel → conv
-            {
-                let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("copy"),
-                });
-                p.set_pipeline(&self.copy_to_conv_pipeline);
-                p.set_bind_group(0, &copy_bg, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
+            self.dispatch_compute(
+                &mut encoder,
+                "copy",
+                &self.copy_to_conv_pipeline,
+                &copy_bg,
+                wg,
+            );
 
             // Forward FFT axis 0
             let (br, fft) = fw_bgs[0];
@@ -972,14 +986,13 @@ impl GpuFlowLenia {
             self.forward_fft_1d[1].record_transform(&mut encoder, lanes1, 1, axis0, br, fft);
 
             // Complex multiply
-            {
-                let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("cmul"),
-                });
-                p.set_pipeline(&self.complex_mul_pipeline);
-                p.set_bind_group(0, &cmul_bg, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
+            self.dispatch_compute(
+                &mut encoder,
+                "cmul",
+                &self.complex_mul_pipeline,
+                &cmul_bg,
+                wg,
+            );
 
             // Inverse FFT axis 1
             let (br, fft) = inv_bgs[1];
@@ -990,24 +1003,16 @@ impl GpuFlowLenia {
             self.inverse_fft_1d[0].record_transform(&mut encoder, lanes0, axis0, 1, br, fft);
 
             // Normalize
-            {
-                let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("norm"),
-                });
-                p.set_pipeline(&self.normalize_pipeline);
-                p.set_bind_group(0, &self.normalize_bg, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
+            self.dispatch_compute(
+                &mut encoder,
+                "norm",
+                &self.normalize_pipeline,
+                &self.normalize_bg,
+                wg,
+            );
 
             // Growth
-            {
-                let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("grow"),
-                });
-                p.set_pipeline(&self.growth_pipeline);
-                p.set_bind_group(0, &grow_bg, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
+            self.dispatch_compute(&mut encoder, "grow", &self.growth_pipeline, &grow_bg, wg);
 
             queue.submit(Some(encoder.finish()));
         }
@@ -1020,61 +1025,58 @@ impl GpuFlowLenia {
         });
 
         // Channel aggregate: u_buffer → u_channel_buffer
-        {
-            let mut p =
-                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ca") });
-            p.set_pipeline(&self.channel_aggregate_pipeline);
-            p.set_bind_group(0, &self.channel_aggregate_bg, &[]);
-            p.dispatch_workgroups(wg_c, 1, 1);
-        }
+        self.dispatch_compute(
+            &mut encoder,
+            "ca",
+            &self.channel_aggregate_pipeline,
+            &self.channel_aggregate_bg,
+            wg_c,
+        );
 
         // Sum channels: channel_buffer → sum_a_buffer
-        {
-            let mut p =
-                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("sc") });
-            p.set_pipeline(&self.sum_channels_pipeline);
-            p.set_bind_group(0, &self.sum_channels_bg, &[]);
-            p.dispatch_workgroups(wg, 1, 1);
-        }
+        self.dispatch_compute(
+            &mut encoder,
+            "sc",
+            &self.sum_channels_pipeline,
+            &self.sum_channels_bg,
+            wg,
+        );
 
         // Sobel U: u_channel_buffer → nabla_u_x, nabla_u_y
-        {
-            let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("sobel_u"),
-            });
-            p.set_pipeline(&self.sobel_pipeline);
-            p.set_bind_group(0, &self.sobel_u_bg, &[]);
-            p.dispatch_workgroups(wg_c, 1, 1);
-        }
+        self.dispatch_compute(
+            &mut encoder,
+            "sobel_u",
+            &self.sobel_pipeline,
+            &self.sobel_u_bg,
+            wg_c,
+        );
 
         // Sobel A: sum_a_buffer → nabla_a_x, nabla_a_y
-        {
-            let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("sobel_a"),
-            });
-            p.set_pipeline(&self.sobel_pipeline);
-            p.set_bind_group(0, &self.sobel_a_bg, &[]);
-            p.dispatch_workgroups(wg, 1, 1);
-        }
+        self.dispatch_compute(
+            &mut encoder,
+            "sobel_a",
+            &self.sobel_pipeline,
+            &self.sobel_a_bg,
+            wg,
+        );
 
         // Flow field
-        {
-            let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("flow"),
-            });
-            p.set_pipeline(&self.flow_field_pipeline);
-            p.set_bind_group(0, &self.flow_field_bg, &[]);
-            p.dispatch_workgroups(wg_c, 1, 1);
-        }
+        self.dispatch_compute(
+            &mut encoder,
+            "flow",
+            &self.flow_field_pipeline,
+            &self.flow_field_bg,
+            wg_c,
+        );
 
         // Reintegration tracking
-        {
-            let mut p =
-                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ri") });
-            p.set_pipeline(&self.reintegration_pipeline);
-            p.set_bind_group(0, &self.reintegration_bg, &[]);
-            p.dispatch_workgroups(wg_c, 1, 1);
-        }
+        self.dispatch_compute(
+            &mut encoder,
+            "ri",
+            &self.reintegration_pipeline,
+            &self.reintegration_bg,
+            wg_c,
+        );
 
         queue.submit(Some(encoder.finish()));
 
