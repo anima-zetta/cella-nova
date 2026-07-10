@@ -6,17 +6,41 @@
 // =============================================================================
 
 // ---------------------------------------------------------------------------
-// FFT: bit-reversal permutation  (bindings 0-1)
+// Stockham FFT: single-pass row/column using shared memory  (bindings 0, 2-3)
+// 256 threads cooperatively process 512 elements entirely in workgroup memory.
 // ---------------------------------------------------------------------------
 @group(0) @binding(0) var<storage, read_write> fft_data: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> twiddles: array<vec2<f32>>;
 
-struct BitRevParams {
-    n: u32,
-    num_lanes: u32,
-    lane_stride: u32,
-    element_stride: u32,
+struct FftParams { width: u32, inverse: u32 }
+@group(0) @binding(3) var<uniform> fft_params: FftParams;
+
+var<workgroup> ping: array<vec2<f32>, 512>;
+var<workgroup> pong: array<vec2<f32>, 512>;
+
+fn complex_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
-@group(0) @binding(1) var<uniform> bit_rev_params: BitRevParams;
+
+fn load_twiddle(stage: u32, k: u32) -> vec2<f32> {
+    let stage_offset = (1u << stage) - 1u;
+    let w = twiddles[stage_offset + k];
+    // Conjugate for inverse FFT
+    return select(w, vec2<f32>(w.x, -w.y), fft_params.inverse == 1u);
+}
+
+fn stockham_butterfly(stage: u32, t: u32, src: ptr<workgroup, array<vec2<f32>, 512>>, dst: ptr<workgroup, array<vec2<f32>, 512>>) {
+    let R = 1u << stage;
+    let b = t / R;
+    let k = t % R;
+    let src0 = b * 2u * R + k;
+    let src1 = src0 + R;
+    let w = load_twiddle(stage, k);
+    let even = (*src)[src0];
+    let odd = complex_mul(w, (*src)[src1]);
+    (*dst)[src0] = even + odd;
+    (*dst)[src1] = even - odd;
+}
 
 fn bit_reverse(x: u32, bits: u32) -> u32 {
     var result: u32 = 0u;
@@ -27,66 +51,65 @@ fn bit_reverse(x: u32, bits: u32) -> u32 {
 }
 
 @compute @workgroup_size(256)
-fn bit_reverse_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let total: u32 = bit_rev_params.n * bit_rev_params.num_lanes;
-    let i: u32 = id.x;
-    if (i >= total) { return; }
-    let lane: u32 = i / bit_rev_params.n;
-    let offset_in_lane: u32 = i % bit_rev_params.n;
-    let bits: u32 = u32(log2(f32(bit_rev_params.n)));
-    let j: u32 = bit_reverse(offset_in_lane, bits);
-    if (offset_in_lane < j) {
-        let base: u32 = lane * bit_rev_params.lane_stride;
-        let a: u32 = base + offset_in_lane * bit_rev_params.element_stride;
-        let b: u32 = base + j * bit_rev_params.element_stride;
-        let tmp: vec2<f32> = fft_data[a];
-        fft_data[a] = fft_data[b];
-        fft_data[b] = tmp;
-    }
-}
+fn fft_row_main(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) wg_id: vec3<u32>
+) {
+    let row = wg_id.x;
+    let base = row * fft_params.width;
+    let t = local_id.x;
 
-// ---------------------------------------------------------------------------
-// FFT: butterfly stage  (bindings 0, 2-3)
-// ---------------------------------------------------------------------------
-@group(0) @binding(2) var<storage, read> twiddles: array<vec2<f32>>;
+    // Load and bit-reverse in one step
+    let rev_t = bit_reverse(t, 9u);
+    let rev_t2 = bit_reverse(t + 256u, 9u);
+    ping[rev_t] = fft_data[base + t];
+    ping[rev_t2] = fft_data[base + t + 256u];
+    workgroupBarrier();
 
-struct FftStageParams {
-    n: u32,
-    stage: u32,
-    inverse: u32,
-    num_lanes: u32,
-    lane_stride: u32,
-    element_stride: u32,
-}
-@group(0) @binding(3) var<uniform> fft_stage_params: FftStageParams;
+    // Cooley-Tukey stages with ping-pong (bit-reversed input → normal output)
+    stockham_butterfly(0u, t, &ping, &pong); workgroupBarrier();
+    stockham_butterfly(1u, t, &pong, &ping); workgroupBarrier();
+    stockham_butterfly(2u, t, &ping, &pong); workgroupBarrier();
+    stockham_butterfly(3u, t, &pong, &ping); workgroupBarrier();
+    stockham_butterfly(4u, t, &ping, &pong); workgroupBarrier();
+    stockham_butterfly(5u, t, &pong, &ping); workgroupBarrier();
+    stockham_butterfly(6u, t, &ping, &pong); workgroupBarrier();
+    stockham_butterfly(7u, t, &pong, &ping); workgroupBarrier();
+    stockham_butterfly(8u, t, &ping, &pong);
 
-fn complex_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+    // After 9 stages (odd), result is in pong
+    fft_data[base + t] = pong[t];
+    fft_data[base + t + 256u] = pong[t + 256u];
 }
 
 @compute @workgroup_size(256)
-fn fft_stage_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let half_n: u32 = fft_stage_params.n / 2u;
-    let butterflies_per_lane: u32 = half_n;
-    let total_butterflies: u32 = butterflies_per_lane * fft_stage_params.num_lanes;
-    let i: u32 = id.x;
-    if (i >= total_butterflies) { return; }
-    let lane: u32 = i / butterflies_per_lane;
-    let butterfly: u32 = i % butterflies_per_lane;
-    let base: u32 = lane * fft_stage_params.lane_stride;
-    let es: u32 = fft_stage_params.element_stride;
-    let stride: u32 = 1u << fft_stage_params.stage;
-    let block_size: u32 = stride * 2u;
-    let block: u32 = butterfly / stride;
-    let offset: u32 = butterfly % stride;
-    let j: u32 = base + (block * block_size + offset) * es;
-    let k: u32 = j + stride * es;
-    let stage_offset: u32 = (1u << fft_stage_params.stage) - 1u;
-    let w: vec2<f32> = twiddles[stage_offset + offset];
-    let even: vec2<f32> = fft_data[j];
-    let odd: vec2<f32> = complex_mul(w, fft_data[k]);
-    fft_data[j] = even + odd;
-    fft_data[k] = even - odd;
+fn fft_col_main(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) wg_id: vec3<u32>
+) {
+    let col = wg_id.x;
+    let w = fft_params.width;
+    let t = local_id.x;
+
+    // Load and bit-reverse in one step
+    let rev_t = bit_reverse(t, 9u);
+    let rev_t2 = bit_reverse(t + 256u, 9u);
+    ping[rev_t] = fft_data[t * w + col];
+    ping[rev_t2] = fft_data[(t + 256u) * w + col];
+    workgroupBarrier();
+
+    stockham_butterfly(0u, t, &ping, &pong); workgroupBarrier();
+    stockham_butterfly(1u, t, &pong, &ping); workgroupBarrier();
+    stockham_butterfly(2u, t, &ping, &pong); workgroupBarrier();
+    stockham_butterfly(3u, t, &pong, &ping); workgroupBarrier();
+    stockham_butterfly(4u, t, &ping, &pong); workgroupBarrier();
+    stockham_butterfly(5u, t, &pong, &ping); workgroupBarrier();
+    stockham_butterfly(6u, t, &ping, &pong); workgroupBarrier();
+    stockham_butterfly(7u, t, &pong, &ping); workgroupBarrier();
+    stockham_butterfly(8u, t, &ping, &pong);
+
+    fft_data[t * w + col] = pong[t];
+    fft_data[(t + 256u) * w + col] = pong[t + 256u];
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@
 //!
 //! All computation runs on the GPU with zero CPU readback between frames.
 
-use crate::wfft::{WgpuContext, WgpuFFT1D};
+use crate::wfft::WgpuContext;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -59,9 +59,10 @@ pub struct GpuFlowLenia {
     /// All kernels packed: [X*Y*k] vec2<f32>
     kernel_buffer: wgpu::Buffer,
 
-    // FFT
-    forward_fft_1d: Vec<WgpuFFT1D>,
-    inverse_fft_1d: Vec<WgpuFFT1D>,
+    fft_row_pipeline: wgpu::ComputePipeline,
+    fft_col_pipeline: wgpu::ComputePipeline,
+    fft_bg: wgpu::BindGroup,
+    inv_fft_bg: wgpu::BindGroup,
 
     // Pipelines
     copy_to_conv_pipeline: wgpu::ComputePipeline,
@@ -129,13 +130,27 @@ impl GpuFlowLenia {
             c1_offsets.push(c1_flat.len() as u32);
         }
 
-        // FFT instances
-        let mut forward_fft_1d = Vec::with_capacity(shape.len());
-        let mut inverse_fft_1d = Vec::with_capacity(shape.len());
-        for &dim in shape {
-            forward_fft_1d.push(WgpuFFT1D::new(Arc::clone(&context), dim, false));
-            inverse_fft_1d.push(WgpuFFT1D::new(Arc::clone(&context), dim, true));
+        // --- Twiddle factors (Stockham arrangement, same values as Cooley-Tukey) ---
+        let n = shape[0] as usize;
+        let num_stages = (n as f64).log2() as u32;
+        let mut twiddles: Vec<[f32; 2]> = Vec::new();
+        for stage in 0..num_stages {
+            let block_size = 1u64 << (stage + 1);
+            for k in 0..(block_size / 2) {
+                let angle = -2.0 * std::f64::consts::PI * (k as f64) / (block_size as f64);
+                twiddles.push([angle.cos() as f32, angle.sin() as f32]);
+            }
         }
+        while twiddles.len() < n {
+            twiddles.push([0.0, 0.0]);
+        }
+        let twiddle_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fl::twiddles"),
+            size: (twiddles.len() * 8) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&twiddle_buffer, 0, bytemuck::cast_slice(&twiddles));
 
         // --- Buffer helpers ---
         let make_storage = |label: &str, size: u64| -> wgpu::Buffer {
@@ -206,6 +221,20 @@ impl GpuFlowLenia {
         let sum_channels_params_buffer = make_uniform("fl::sc_params", 8);
         let flow_field_params_buffer = make_uniform("fl::ff_params", 12);
         let reintegration_params_buffer = make_uniform("fl::ri_params", 36);
+
+        // FFT params buffers: separate for forward and inverse (alignment requirement)
+        let fft_params_buffer = make_uniform("fl::fft_params", 8);
+        queue.write_buffer(
+            &fft_params_buffer,
+            0,
+            bytemuck::cast_slice(&[shape[0] as u32, 0u32]),
+        );
+        let inv_fft_params_buffer = make_uniform("fl::inv_fft_params", 8);
+        queue.write_buffer(
+            &inv_fft_params_buffer,
+            0,
+            bytemuck::cast_slice(&[shape[0] as u32, 1u32]),
+        );
 
         // Mapping buffers
         let c1_flat_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -286,6 +315,10 @@ impl GpuFlowLenia {
                 label: Some("fl::normalize_growth bgl"),
                 entries: &[srw(8), srw(9), srw(10), unif(11), sro(12)],
             });
+        let fft_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fl::fft bgl"),
+            entries: &[srw(0), sro(2), unif(3)],
+        });
         let channel_aggregate_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("fl::ca bgl"),
@@ -356,6 +389,18 @@ impl GpuFlowLenia {
             &compute_sm,
             "normalize_growth_main",
         );
+        let fft_row_pipeline = cp(
+            "fl::fft_row",
+            &pl("fl::fft_row pl", &fft_bgl),
+            &compute_sm,
+            "fft_row_main",
+        );
+        let fft_col_pipeline = cp(
+            "fl::fft_col",
+            &pl("fl::fft_col pl", &fft_bgl),
+            &compute_sm,
+            "fft_col_main",
+        );
         let channel_aggregate_pipeline = cp(
             "fl::ca",
             &pl("fl::ca pl", &channel_aggregate_bgl),
@@ -388,7 +433,7 @@ impl GpuFlowLenia {
         );
 
         // --- Write uniform params ---
-        let padded_n = forward_fft_1d[0].padded_len() as f32;
+        let padded_n = shape[0] as f32;
         let norm_factor = 1.0 / padded_n.powi(shape.len() as i32);
         queue.write_buffer(
             &normalize_params_buffer,
@@ -613,6 +658,48 @@ impl GpuFlowLenia {
             ],
         });
 
+        let fft_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fl::fft bg"),
+            layout: &fft_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: conv_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: twiddle_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: fft_params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let inv_fft_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fl::inv_fft bg"),
+            layout: &fft_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: conv_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: twiddle_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &inv_fft_params_buffer,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(8),
+                    }),
+                },
+            ],
+        });
+
         let reintegration_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fl::ri bg"),
             layout: &reintegration_bgl,
@@ -660,8 +747,10 @@ impl GpuFlowLenia {
             conv_buffer,
             conv_saved_buffer,
             kernel_buffer,
-            forward_fft_1d,
-            inverse_fft_1d,
+            fft_row_pipeline,
+            fft_col_pipeline,
+            fft_bg,
+            inv_fft_bg,
             copy_to_conv_pipeline,
             complex_mul_pipeline,
             normalize_growth_pipeline,
@@ -918,20 +1007,7 @@ impl GpuFlowLenia {
         let total = self.total_elements as u32;
         let wg = (total + 255) / 256;
         let wg_c = ((total * self.num_channels as u32) + 255) / 256;
-
-        let axis0 = self.shape[0] as u32;
-        let axis1 = self.shape[1] as u32;
-        let lanes0 = self.total_elements / axis0 as usize;
-        let lanes1 = self.total_elements / axis1 as usize;
-
-        // Cache FFT bind groups
-        let fft_bgs: Vec<_> = self
-            .forward_fft_1d
-            .iter()
-            .chain(self.inverse_fft_1d.iter())
-            .map(|fft| fft.ensure_bind_groups(&self.conv_buffer))
-            .collect();
-        let (fw_bgs, inv_bgs) = fft_bgs.split_at(self.forward_fft_1d.len());
+        let sz = self.shape[0] as u32;
 
         // ================================================================
         // Phase 1: Per-kernel convolution + growth
@@ -1017,13 +1093,21 @@ impl GpuFlowLenia {
                 wg,
             );
 
-            // Forward FFT axis 0
-            let (br, fft) = fw_bgs[0];
-            self.forward_fft_1d[0].record_transform(&mut encoder, lanes0, axis0, 1, br, fft);
-
-            // Forward FFT axis 1
-            let (br, fft) = fw_bgs[1];
-            self.forward_fft_1d[1].record_transform(&mut encoder, lanes1, 1, axis0, br, fft);
+            // Forward FFT: row pass then column pass (Stockham, shared memory)
+            self.dispatch_compute(
+                &mut encoder,
+                "fft_row",
+                &self.fft_row_pipeline,
+                &self.fft_bg,
+                sz,
+            );
+            self.dispatch_compute(
+                &mut encoder,
+                "fft_col",
+                &self.fft_col_pipeline,
+                &self.fft_bg,
+                sz,
+            );
 
             // Save frequency-domain data for reuse
             encoder.copy_buffer_to_buffer(
@@ -1036,16 +1120,15 @@ impl GpuFlowLenia {
 
             for (i, k) in kernels.iter().enumerate() {
                 // Restore frequency-domain data (skip for first kernel, it's already there)
-                if i == 0 {
-                    continue;
-                };
-                encoder.copy_buffer_to_buffer(
-                    &self.conv_saved_buffer,
-                    0,
-                    &self.conv_buffer,
-                    0,
-                    conv_buf_size,
-                );
+                if i > 0 {
+                    encoder.copy_buffer_to_buffer(
+                        &self.conv_saved_buffer,
+                        0,
+                        &self.conv_buffer,
+                        0,
+                        conv_buf_size,
+                    );
+                }
 
                 // Complex multiply
                 self.dispatch_compute(
@@ -1056,13 +1139,21 @@ impl GpuFlowLenia {
                     wg,
                 );
 
-                // Inverse FFT axis 1
-                let (br, fft) = inv_bgs[1];
-                self.inverse_fft_1d[1].record_transform(&mut encoder, lanes1, 1, axis0, br, fft);
-
-                // Inverse FFT axis 0
-                let (br, fft) = inv_bgs[0];
-                self.inverse_fft_1d[0].record_transform(&mut encoder, lanes0, axis0, 1, br, fft);
+                // Inverse FFT: column pass then row pass (Stockham, shared memory)
+                self.dispatch_compute(
+                    &mut encoder,
+                    "inv_fft_col",
+                    &self.fft_col_pipeline,
+                    &self.inv_fft_bg,
+                    sz,
+                );
+                self.dispatch_compute(
+                    &mut encoder,
+                    "inv_fft_row",
+                    &self.fft_row_pipeline,
+                    &self.inv_fft_bg,
+                    sz,
+                );
 
                 // Normalize + Growth (fused)
                 self.dispatch_compute(
