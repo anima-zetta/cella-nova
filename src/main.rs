@@ -1,4 +1,4 @@
-use lenia_ca::gpu_flow_lenia::GpuFlowLenia;
+use lenia_ca::orchestrator::GpuFlowLenia;
 use lenia_ca::wfft::WgpuContext;
 use serde::Deserialize;
 use std::sync::Arc;
