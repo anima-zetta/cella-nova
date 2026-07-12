@@ -54,7 +54,9 @@ def build_kernels(ba, bw, bb, br, global_r):
             diff = d_scaled - ba[k, i]
             ker_val = ker_val + bb[k, i] * torch.exp(-(diff * diff) / (bw[k, i] + 1e-6))
         kernel_real = sig * ker_val
-        kernel_real = kernel_real / (kernel_real.sum() + 1e-6)
+        total = kernel_real.sum()
+        if total > 0:
+            kernel_real = kernel_real / total
         kernels.append(kernel_real)
     return torch.cat(kernels, dim=0)
 
@@ -140,14 +142,6 @@ def compute_center_of_mass(field):
 
 
 # --- Target ---
-def generate_target(cx, cy, size=GRID_SIZE, ri=18.0, ro=35.0):
-    i, j = torch.meshgrid(torch.arange(size, device=DEVICE), torch.arange(size, device=DEVICE), indexing="ij")
-    d = torch.sqrt((i - cy) ** 2 + (j - cx) ** 2)
-    inner = (d <= ri).float()
-    outer = ((d > ri) & (d <= ro)).float() * 0.5
-    return (inner + outer).unsqueeze(0).unsqueeze(0).repeat(1, NUM_CHANNELS, 1, 1)
-
-
 # --- Export ---
 def save_kernels_fft(kfft, path):
     with open(path, "wb") as f:
@@ -217,7 +211,7 @@ def forward_step(channels, params):
 # --- Training ---
 def train(args):
     print(f"Device: {DEVICE}")
-    print(f"Fine-tuning '{args.creature}' toward goal={GOAL}\n")
+    print(f"Fine-tuning '{args.creature}' to maximize movement from start\n")
 
     init_state, ba, bw, bb, br, global_r = load_creature(args.creature)
 
@@ -228,30 +222,34 @@ def train(args):
     gr = torch.tensor(global_r, device=DEVICE, dtype=torch.float32).requires_grad_(True)
     h = torch.ones(NUM_KERNELS, device=DEVICE).requires_grad_(True)
     m = torch.zeros(NUM_KERNELS, device=DEVICE).requires_grad_(True)
-    s = torch.ones(NUM_KERNELS, device=DEVICE) * 0.15
-    s.requires_grad_(True)
+    s = torch.ones(NUM_KERNELS, device=DEVICE) * 5.0
+    s.requires_grad_(True)  # matches Rust default
     init_opt = init_state.clone().requires_grad_(True)
+    init_frozen = init_state.clone()  # frozen copy for shape loss
 
     opt = torch.optim.Adam([
         {"params": [ba, bw, bb, br, gr, h, m, s], "lr": args.lr},
         {"params": [init_opt], "lr": args.lr * 10},
     ])
 
-    gx, gy = GOAL
+    with torch.no_grad():
+        start_cx, start_cy = compute_center_of_mass(init_opt)
     params = (ba, bw, bb, br, gr, h, m, s)
-    A1 = init_opt
-
-    cx, cy = compute_center_of_mass(A1)
-    target = generate_target(gx, gy)
-    loss = F.mse_loss(A1, target) + ((cx - gx) ** 2 + (cy - gy) ** 2) / (GRID_SIZE ** 2)
 
     for epoch in range(args.epochs):
+        A1 = init_opt
         for _ in range(BPTT_STEPS):
             A1 = forward_step(A1, params)
 
         cx, cy = compute_center_of_mass(A1)
-        target = generate_target(gx, gy)
-        loss = F.mse_loss(A1, target) + ((cx - gx) ** 2 + (cy - gy) ** 2) / (GRID_SIZE ** 2)
+        dist = torch.sqrt((cx - start_cx) ** 2 + (cy - start_cy) ** 2 + 1e-8)
+        movement_loss = -dist / GRID_SIZE
+        # Soft shape preservation: penalize mass far from the original blob area
+        size_ratio = A1.sum() / init_frozen.sum()
+        size_loss = torch.clamp(size_ratio - 2.0, min=0.0)  # penalize if more than 2x original mass
+        mass = A1.sum()
+        mass_loss = torch.clamp(5000.0 - mass, min=0.0) / 5000.0
+        loss = movement_loss + size_loss + mass_loss * 0.5
 
         opt.zero_grad()
         loss.backward()
@@ -259,13 +257,13 @@ def train(args):
 
         with torch.no_grad():
             ba.clamp_(0.01, 1.0); bw.clamp_(0.01, 0.3); bb.clamp_(-2.0, 2.0); br.clamp_(0.1, 2.0)
-            gr.clamp_(10.0, 100.0); h.clamp_(0.0, 5.0); m.clamp_(0.05, 0.35); s.clamp_(0.05, 0.25)
+            gr.clamp_(10.0, 100.0); h.clamp_(0.0, 5.0); m.clamp_(0.05, 0.35); s.clamp_(0.1, 10.0)
             init_opt.clamp_(0.0, 1.0)
 
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"epoch {epoch + 1:4d}/{args.epochs}  COM=({cx.item():6.1f}, {cy.item():6.1f})  loss={loss.item():.4e}  mass={A1.sum().item():.0f}")
+            print(f"epoch {epoch + 1:4d}/{args.epochs}  COM=({cx.item():6.1f}, {cy.item():6.1f})  dist={dist.item():.1f}  loss={loss.item():.4e}  mass={A1.sum().item():.0f}")
 
-    print(f"\nFinal COM: ({cx.item():.1f}, {cy.item():.1f})")
+    print(f"\nFinal COM: ({cx.item():.1f}, {cy.item():.1f})  distance moved: {dist.item():.1f}")
     kernels = build_kernels(ba.detach(), bw.detach(), bb.detach(), br.detach(), gr.detach())
     kernels = torch.fft.ifftshift(kernels, dim=(-2, -1))
     save_kernels_fft(torch.fft.fft2(kernels), f"kernels/{args.creature}_finetuned.bin")
