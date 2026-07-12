@@ -166,6 +166,40 @@ def reintegrate(channels, flow_x, flow_y):
     )
 
 
+# --- Shape metrics ---
+def compute_radius(field):
+    """Compute radius of gyration (weighted RMS distance from center of mass).
+
+    Measures how spread out the creature is. A compact blob has small radius,
+    a diffuse cloud has large radius.
+    """
+    B, C, H, W = field.shape
+    mass = field.sum()
+    if mass < 1e-6:
+        return torch.tensor(0.0, device=field.device)
+
+    total = field.sum(dim=1, keepdim=True)  # [B, 1, H, W]
+    grid_x = torch.arange(W, device=field.device).float()[None, None, None, :]
+    grid_y = torch.arange(H, device=field.device).float()[None, None, :, None]
+
+    cx = (total * grid_x).sum() / mass
+    cy = (total * grid_y).sum() / mass
+
+    dx2 = (grid_x - cx) ** 2
+    dy2 = (grid_y - cy) ** 2
+    dist2 = dx2 + dy2
+
+    radius = torch.sqrt((total * dist2).sum() / mass)
+    return radius
+
+
+def compute_channel_fractions(field):
+    """Return fraction of total mass in each channel: [B, C]"""
+    ch_mass = field.sum(dim=(2, 3))  # [B, C]
+    total = ch_mass.sum(dim=1, keepdim=True)  # [B, 1]
+    return ch_mass / (total + 1e-8)
+
+
 # --- Center of mass ---
 def compute_center_of_mass(field):
     size = field.shape[-1]
@@ -254,20 +288,45 @@ def forward_step(channels, params):
 
 
 # --- Training ---
-def run_epoch(init_opt, params, opt, init_frozen, start_cx, start_cy):
-    """Run a single training epoch: forward BPTT steps, compute loss, backward, update."""
-    A1 = init_opt
+def run_epoch(init_state, params, opt, init_frozen, start_cx, start_cy,
+              init_radius, init_ch_frac):
+    """Run a single training epoch: forward BPTT steps, compute loss, backward, update.
+
+    The initial seed (init_state) is FIXED — only bump params and growth params
+    are trained. The creature must learn to move through its dynamics.
+
+    Loss terms:
+      movement  : encourage center of mass to move from start
+      size      : penalize if total mass > 2x original
+      mass      : penalize if total mass < 5000
+      radius    : penalize if creature spreads out (radius > 1.1x original)
+      channels  : penalize if mass distribution across channels drifts
+    """
+    A1 = init_state
     for _ in range(BPTT_STEPS):
         A1 = forward_step(A1, params)
 
+    # --- Movement ---
     cx, cy = compute_center_of_mass(A1)
     dist = torch.sqrt((cx - start_cx) ** 2 + (cy - start_cy) ** 2 + 1e-8)
     movement_loss = -dist / GRID_SIZE
-    size_ratio = A1.sum() / init_frozen.sum()
-    size_loss = torch.clamp(size_ratio - 2.0, min=0.0)
+
+    # --- Mass bounds ---
     mass = A1.sum()
+    size_ratio = mass / init_frozen.sum()
+    size_loss = torch.clamp(size_ratio - 2.0, min=0.0)
     mass_loss = torch.clamp(5000.0 - mass, min=0.0) / 5000.0
-    loss = movement_loss + size_loss + mass_loss * 0.5
+
+    # --- Shape: penalize spreading (strict: 1.1x threshold, high weight) ---
+    radius = compute_radius(A1)
+    radius_loss = torch.clamp(radius / (init_radius + 1e-8) - 1.1, min=0.0) * 3.0
+
+    # --- Channels: penalize mass drift across channels ---
+    ch_frac = compute_channel_fractions(A1)
+    channel_loss = torch.sum((ch_frac - init_ch_frac) ** 2) * NUM_CHANNELS * 3.0
+
+    loss = (movement_loss + size_loss + mass_loss * 0.5
+            + radius_loss + channel_loss)
 
     opt.zero_grad()
     loss.backward()
@@ -291,26 +350,31 @@ def train(args):
     m = torch.zeros(NUM_KERNELS, device=DEVICE).requires_grad_(True)
     s = torch.ones(NUM_KERNELS, device=DEVICE) * 5.0
     s.requires_grad_(True)
-    init_opt = init_state.clone().requires_grad_(True)
+
+    # Initial seed is FIXED — only bump params and growth params are trained.
+    # The creature must learn to move through its dynamics, not by changing its start state.
     init_frozen = init_state.clone()
 
     opt = torch.optim.Adam([
         {"params": [ba, bw, bb, br, gr, h, m, s], "lr": args.lr},
-        {"params": [init_opt], "lr": args.lr * 10},
     ])
 
     with torch.no_grad():
-        start_cx, start_cy = compute_center_of_mass(init_opt)
+        start_cx, start_cy = compute_center_of_mass(init_state)
+        init_radius = compute_radius(init_frozen)
+        init_ch_frac = compute_channel_fractions(init_frozen)
     params = (ba, bw, bb, br, gr, h, m, s)
 
     if args.epochs > 0:
         for epoch in range(args.epochs):
-            cx, cy, dist, loss, A1 = run_epoch(init_opt, params, opt, init_frozen, start_cx, start_cy)
+            cx, cy, dist, loss, A1 = run_epoch(
+                init_state, params, opt, init_frozen,
+                start_cx, start_cy, init_radius, init_ch_frac,
+            )
 
             with torch.no_grad():
                 ba.clamp_(0.01, 1.0); bw.clamp_(0.01, 0.3); bb.clamp_(-2.0, 2.0); br.clamp_(0.1, 2.0)
                 gr.clamp_(10.0, 100.0); h.clamp_(0.0, 5.0); m.clamp_(0.05, 0.35); s.clamp_(0.1, 10.0)
-                init_opt.clamp_(0.0, 1.0)
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 print(f"epoch {epoch + 1:4d}/{args.epochs}  COM=({cx.item():6.1f}, {cy.item():6.1f})  dist={dist.item():.1f}  loss={loss.item():.4e}  mass={A1.sum().item():.0f}")
@@ -322,7 +386,7 @@ def train(args):
     kernels = build_kernels(ba.detach(), bw.detach(), bb.detach(), br.detach(), gr.detach())
     kernels = torch.fft.ifftshift(kernels, dim=(-2, -1))
     save_kernels_fft(torch.fft.fft2(kernels), f"kernels/{args.creature}_finetuned.bin")
-    export_seed(init_opt.detach(), f"{args.creature}_finetuned")
+    export_seed(init_state, f"{args.creature}_finetuned")
 
 
 if __name__ == "__main__":
