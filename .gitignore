@@ -5,3 +5,4 @@ train/trained_kernels.bin
 kernels/**
 seed/**
 train/trained_**
+.poolside/

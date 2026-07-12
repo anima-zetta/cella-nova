@@ -25,7 +25,6 @@ fn complex_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
 fn load_twiddle(stage: u32, k: u32) -> vec2<f32> {
     let stage_offset = (1u << stage) - 1u;
     let w = twiddles[stage_offset + k];
-    // Conjugate for inverse FFT
     return select(w, vec2<f32>(w.x, -w.y), fft_params.inverse == 1u);
 }
 
@@ -59,14 +58,12 @@ fn fft_row_main(
     let base = row * fft_params.width;
     let t = local_id.x;
 
-    // Load and bit-reverse in one step
     let rev_t = bit_reverse(t, 9u);
     let rev_t2 = bit_reverse(t + 256u, 9u);
     ping[rev_t] = fft_data[base + t];
     ping[rev_t2] = fft_data[base + t + 256u];
     workgroupBarrier();
 
-    // Cooley-Tukey stages with ping-pong (bit-reversed input → normal output)
     stockham_butterfly(0u, t, &ping, &pong); workgroupBarrier();
     stockham_butterfly(1u, t, &pong, &ping); workgroupBarrier();
     stockham_butterfly(2u, t, &ping, &pong); workgroupBarrier();
@@ -77,7 +74,6 @@ fn fft_row_main(
     stockham_butterfly(7u, t, &pong, &ping); workgroupBarrier();
     stockham_butterfly(8u, t, &ping, &pong);
 
-    // After 9 stages (odd), result is in pong
     fft_data[base + t] = pong[t];
     fft_data[base + t + 256u] = pong[t + 256u];
 }
@@ -91,7 +87,6 @@ fn fft_col_main(
     let w = fft_params.width;
     let t = local_id.x;
 
-    // Load and bit-reverse in one step
     let rev_t = bit_reverse(t, 9u);
     let rev_t2 = bit_reverse(t + 256u, 9u);
     ping[rev_t] = fft_data[t * w + col];
@@ -113,7 +108,7 @@ fn fft_col_main(
 }
 
 // ---------------------------------------------------------------------------
-// copy_to_conv: real channel → complex conv buffer  (bindings 4-5)
+// copy_to_conv: real channel -> complex conv buffer  (bindings 4-5)
 // ---------------------------------------------------------------------------
 @group(0) @binding(4) var<storage, read> ctc_channel: array<f32>;
 @group(0) @binding(5) var<storage, read_write> ctc_conv: array<vec2<f32>>;
@@ -163,7 +158,7 @@ fn normalize_growth_main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // ---------------------------------------------------------------------------
-// channel_aggregate: per-kernel growth → per-channel  (bindings 13-17)
+// channel_aggregate: per-kernel growth -> per-channel  (bindings 13-17)
 // ---------------------------------------------------------------------------
 struct CaParams { width: u32, num_kernels: u32, num_channels: u32 }
 
@@ -211,7 +206,7 @@ fn sum_channels_main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // ---------------------------------------------------------------------------
-// sobel: 3×3 gradient  (bindings 21-24)
+// sobel: 3x3 gradient  (bindings 21-24)
 // ---------------------------------------------------------------------------
 struct SobelParams { width: u32, height: u32, num_fields: u32 }
 
