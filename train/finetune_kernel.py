@@ -328,6 +328,9 @@ def train(args):
 
     init_state, ba, bw, bb, br, global_r = load_creature(args.creature)
 
+    # Make seed trainable
+    init_state = init_state.clone().requires_grad_(True)
+
     ba = ba.clone().requires_grad_(True)
     bw = bw.clone().requires_grad_(True)
     bb = bb.clone().requires_grad_(True)
@@ -338,10 +341,11 @@ def train(args):
     s = torch.ones(NUM_KERNELS, device=DEVICE) * 5.0
     s.requires_grad_(True)
 
-    init_frozen = init_state.clone()
+    # Keep a frozen copy of the original seed for reference metrics
+    init_frozen = init_state.clone().detach()
 
     opt = torch.optim.Adam([
-        {"params": [ba, bw, bb, br, gr, h, m, s], "lr": args.lr},
+        {"params": [init_state, ba, bw, bb, br, gr, h, m, s], "lr": args.lr},
     ])
 
     with torch.no_grad():
@@ -360,6 +364,7 @@ def train(args):
             with torch.no_grad():
                 ba.clamp_(0.01, 1.0); bw.clamp_(0.01, 0.3); bb.clamp_(-2.0, 2.0); br.clamp_(0.1, 2.0)
                 gr.clamp_(10.0, 100.0); h.clamp_(0.0, 5.0); m.clamp_(0.05, 0.35); s.clamp_(0.1, 10.0)
+                init_state.clamp_(0.0, 1.0)
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 print(f"epoch {epoch + 1:4d}/{args.epochs}  COM=({cx.item():6.1f}, {cy.item():6.1f})  dist={dist.item():.1f}  loss={loss.item():.4e}  mass={A1.sum().item():.0f}")
