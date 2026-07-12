@@ -106,12 +106,13 @@ def save_kernels_bin(kernels: list[npt.NDArray[np.complex64]], path: str) -> Non
     print(f"  Saved {path} ({size_mb:.1f} MB)")
 
 
-def save_seed_json(seed_channels: list[list[float]], path: str) -> None:
-    """Save seed channels as JSON."""
-    data: dict[str, object] = {
+def save_seed_json(seed_channels, bump_params, path):
+    """Save seed channels and bump parameters as JSON."""
+    data = {
         "grid_size": GRID_SIZE,
         "num_channels": NUM_CHANNELS,
         "seed_channels": seed_channels,
+        "bump_params": bump_params,
     }
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
@@ -151,7 +152,15 @@ def generate_creature(name: str, config: dict[str, Any]) -> None:
     os.makedirs("kernels", exist_ok=True)
     os.makedirs("seed", exist_ok=True)
     save_kernels_bin(kernels, f"kernels/{name}.bin")
-    save_seed_json(seed_channels, f"seed/{name}.json")
+    bump_params = {
+        "num_kernels": num_kernels,
+        "global_r": config["global_r"],
+        "radii": config["radii"],
+        "a": config["a"],
+        "w": config["w"],
+        "b": config["b"],
+    }
+    save_seed_json(seed_channels, bump_params, f"seed/{name}.json")
 
 
 # ---------------------------------------------------------------------------

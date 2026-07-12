@@ -20,7 +20,7 @@ fn creature_name() -> String {
             .cloned()
             .unwrap_or_else(|| "glider".to_string())
     } else {
-        "glider".to_string()
+        panic!("Provide creature name");
     }
 }
 
