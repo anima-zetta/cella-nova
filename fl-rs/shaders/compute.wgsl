@@ -1,5 +1,6 @@
 // =============================================================================
-// compute.wgsl — All compute shaders for the Flow Lenia simulation.
+// compute_64.wgsl — All compute shaders for the Flow Lenia simulation.
+// 64x64 grid variant: 32 threads process 64 elements per workgroup.
 //
 // Each entry point uses unique (group=0, binding) pairs so they can coexist
 // in one module without conflicts.
@@ -7,7 +8,7 @@
 
 // ---------------------------------------------------------------------------
 // Stockham FFT: single-pass row/column using shared memory  (bindings 0, 2-3)
-// 256 threads cooperatively process 512 elements entirely in workgroup memory.
+// 32 threads cooperatively process 64 elements entirely in workgroup memory.
 // ---------------------------------------------------------------------------
 @group(0) @binding(0) var<storage, read_write> fft_data: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> twiddles: array<vec2<f32>>;
@@ -15,8 +16,8 @@
 struct FftParams { width: u32, inverse: u32 }
 @group(0) @binding(3) var<uniform> fft_params: FftParams;
 
-var<workgroup> ping: array<vec2<f32>, 512>;
-var<workgroup> pong: array<vec2<f32>, 512>;
+var<workgroup> ping: array<vec2<f32>, 64>;
+var<workgroup> pong: array<vec2<f32>, 64>;
 
 fn complex_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
@@ -28,7 +29,7 @@ fn load_twiddle(stage: u32, k: u32) -> vec2<f32> {
     return select(w, vec2<f32>(w.x, -w.y), fft_params.inverse == 1u);
 }
 
-fn stockham_butterfly(stage: u32, t: u32, src: ptr<workgroup, array<vec2<f32>, 512>>, dst: ptr<workgroup, array<vec2<f32>, 512>>) {
+fn stockham_butterfly(stage: u32, t: u32, src: ptr<workgroup, array<vec2<f32>, 64>>, dst: ptr<workgroup, array<vec2<f32>, 64>>) {
     let R = 1u << stage;
     let b = t / R;
     let k = t % R;
@@ -49,7 +50,7 @@ fn bit_reverse(x: u32, bits: u32) -> u32 {
     return result;
 }
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(32)
 fn fft_row_main(
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) wg_id: vec3<u32>
@@ -58,10 +59,10 @@ fn fft_row_main(
     let base = row * fft_params.width;
     let t = local_id.x;
 
-    let rev_t = bit_reverse(t, 9u);
-    let rev_t2 = bit_reverse(t + 256u, 9u);
+    let rev_t = bit_reverse(t, 6u);
+    let rev_t2 = bit_reverse(t + 32u, 6u);
     ping[rev_t] = fft_data[base + t];
-    ping[rev_t2] = fft_data[base + t + 256u];
+    ping[rev_t2] = fft_data[base + t + 32u];
     workgroupBarrier();
 
     stockham_butterfly(0u, t, &ping, &pong); workgroupBarrier();
@@ -69,16 +70,13 @@ fn fft_row_main(
     stockham_butterfly(2u, t, &ping, &pong); workgroupBarrier();
     stockham_butterfly(3u, t, &pong, &ping); workgroupBarrier();
     stockham_butterfly(4u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(8u, t, &ping, &pong);
+    stockham_butterfly(5u, t, &pong, &ping);
 
-    fft_data[base + t] = pong[t];
-    fft_data[base + t + 256u] = pong[t + 256u];
+    fft_data[base + t] = ping[t];
+    fft_data[base + t + 32u] = ping[t + 32u];
 }
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(32)
 fn fft_col_main(
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) wg_id: vec3<u32>
@@ -87,10 +85,10 @@ fn fft_col_main(
     let w = fft_params.width;
     let t = local_id.x;
 
-    let rev_t = bit_reverse(t, 9u);
-    let rev_t2 = bit_reverse(t + 256u, 9u);
+    let rev_t = bit_reverse(t, 6u);
+    let rev_t2 = bit_reverse(t + 32u, 6u);
     ping[rev_t] = fft_data[t * w + col];
-    ping[rev_t2] = fft_data[(t + 256u) * w + col];
+    ping[rev_t2] = fft_data[(t + 32u) * w + col];
     workgroupBarrier();
 
     stockham_butterfly(0u, t, &ping, &pong); workgroupBarrier();
@@ -98,13 +96,10 @@ fn fft_col_main(
     stockham_butterfly(2u, t, &ping, &pong); workgroupBarrier();
     stockham_butterfly(3u, t, &pong, &ping); workgroupBarrier();
     stockham_butterfly(4u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(8u, t, &ping, &pong);
+    stockham_butterfly(5u, t, &pong, &ping);
 
-    fft_data[t * w + col] = pong[t];
-    fft_data[(t + 256u) * w + col] = pong[t + 256u];
+    fft_data[t * w + col] = ping[t];
+    fft_data[(t + 32u) * w + col] = ping[t + 32u];
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +316,6 @@ fn reintegration_main(@builtin(global_invocation_id) id: vec3<u32>) {
             if (nx < 0 || nx >= w_i32 || ny < 0 || ny >= h_i32) { continue; }
             let n_idx: u32 = u32(ny) * w + u32(nx);
             let a: f32 = ri_channel[c_base + n_idx];
-            if (a <= 0.0) { continue; }
             let n_pos_x: f32 = f32(nx) + 0.5;
             let n_pos_y: f32 = f32(ny) + 0.5;
             let fx: f32 = clamp(ri_flow_x[c_base + n_idx], -ma, ma);
@@ -366,9 +360,8 @@ fn reintegration_params_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let h_i32: i32 = i32(h);
     let max_sz: f32 = min(1.0, 2.0 * sigma);
     let area_norm: f32 = 4.0 * sigma * sigma;
-    let num_channels: u32 = ri_params.num_channels;
     let k_base: u32 = k * w * h;
-    var sum_param: f32 = 0.0;
+    var sum_val: f32 = 0.0;
     var total_weight: f32 = 0.0;
     for (var dx: i32 = -dd; dx <= dd; dx = dx + 1) {
         for (var dy: i32 = -dd; dy <= dd; dy = dy + 1) {
@@ -376,35 +369,24 @@ fn reintegration_params_main(@builtin(global_invocation_id) id: vec3<u32>) {
             let ny: i32 = i32(y) + dy;
             if (nx < 0 || nx >= w_i32 || ny < 0 || ny >= h_i32) { continue; }
             let n_idx: u32 = u32(ny) * w + u32(nx);
-            // Compute total density at neighbor (sum over channels)
-            var total_a: f32 = 0.0;
-            for (var c: u32 = 0u; c < num_channels; c = c + 1u) {
-                total_a = total_a + ri_channel[c * w * h + n_idx];
-            }
-            if (total_a <= 0.0) { continue; }
-            // Compute density-weighted average area from per-channel flow
-            var weight: f32 = 0.0;
-            for (var c: u32 = 0u; c < num_channels; c = c + 1u) {
-                let c_base: u32 = c * w * h;
-                let n_pos_x: f32 = f32(nx) + 0.5;
-                let n_pos_y: f32 = f32(ny) + 0.5;
-                let fx: f32 = clamp(ri_flow_x[c_base + n_idx], -ma, ma);
-                let fy: f32 = clamp(ri_flow_y[c_base + n_idx], -ma, ma);
-                let mu_x: f32 = clamp(n_pos_x + fx * dt, sigma, f32(w) - sigma);
-                let mu_y: f32 = clamp(n_pos_y + fy * dt, sigma, f32(h) - sigma);
-                let dpx: f32 = abs(pos_x - mu_x);
-                let dpy: f32 = abs(pos_y - mu_y);
-                let sz_x: f32 = clamp(0.5 - dpx + sigma, 0.0, max_sz);
-                let sz_y: f32 = clamp(0.5 - dpy + sigma, 0.0, max_sz);
-                let area: f32 = (sz_x * sz_y) / area_norm;
-                weight = weight + area * ri_channel[c_base + n_idx];
-            }
-            total_weight = total_weight + weight;
-            sum_param = sum_param + ri_params_field[k_base + n_idx] * weight;
+            let a: f32 = ri_channel[n_idx];
+            let n_pos_x: f32 = f32(nx) + 0.5;
+            let n_pos_y: f32 = f32(ny) + 0.5;
+            let fx: f32 = clamp(ri_flow_x[n_idx], -ma, ma);
+            let fy: f32 = clamp(ri_flow_y[n_idx], -ma, ma);
+            let mu_x: f32 = clamp(n_pos_x + fx * dt, sigma, f32(w) - sigma);
+            let mu_y: f32 = clamp(n_pos_y + fy * dt, sigma, f32(h) - sigma);
+            let dpx: f32 = abs(pos_x - mu_x);
+            let dpy: f32 = abs(pos_y - mu_y);
+            let sz_x: f32 = clamp(0.5 - dpx + sigma, 0.0, max_sz);
+            let sz_y: f32 = clamp(0.5 - dpy + sigma, 0.0, max_sz);
+            let area: f32 = (sz_x * sz_y) / area_norm;
+            sum_val = sum_val + ri_params_field[k_base + n_idx] * a * area;
+            total_weight = total_weight + a * area;
         }
     }
     if (total_weight > 0.0) {
-        ri_new_params_field[idx] = sum_param / total_weight;
+        ri_new_params_field[idx] = sum_val / total_weight;
     } else {
         ri_new_params_field[idx] = ri_params_field[idx];
     }

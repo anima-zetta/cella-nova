@@ -238,7 +238,7 @@ impl GradientFlowPhase {
         let mut data = Vec::with_capacity(12);
         data.extend_from_slice(&(shape[0] as u32).to_le_bytes());
         data.extend_from_slice(&(num_channels as u32).to_le_bytes());
-        data.extend_from_slice(&(num_channels as f32).to_le_bytes());
+        data.extend_from_slice(&(1.0f32).to_le_bytes());
         queue.write_buffer(&flow_field_params_buffer, 0, &data);
 
         // Bind group layout helpers
