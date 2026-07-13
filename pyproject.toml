@@ -9,4 +9,11 @@ description = "Flow Lenia kernel generation"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
+    "jax>=0.4",
+    "jaxlib>=0.4",
+    "chex>=0.1",
+    "matplotlib>=3.7",
+    "moviepy>=2.0",
+    "ipython>=8.0",
+    "scipy>=1.10",
 ]

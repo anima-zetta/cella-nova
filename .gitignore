@@ -6,3 +6,4 @@ kernels/**
 seed/**
 train/trained_**
 .poolside/
+pngs/**

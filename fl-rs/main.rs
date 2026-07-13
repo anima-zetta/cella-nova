@@ -1,8 +1,11 @@
-use lenia_ca::orchestrator::GpuFlowLenia;
-use lenia_ca::wfft::WgpuContext;
+mod orchestrator;
+mod wfft;
+
+use orchestrator::GpuFlowLenia;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
+use wfft::WgpuContext;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
