@@ -507,35 +507,35 @@ impl AdvectionPhase {
         queue: &wgpu::Queue,
         shape: &[usize],
         num_channels: usize,
+        num_kernels: usize,
         dd: i32,
         sigma: f32,
         dt: f32,
-        basal_metabolic_rate: f32,
-        kinetic_cost: f32,
         // Shared buffers
         channel_buffer: &wgpu::Buffer,
         flow_x_buffer: &wgpu::Buffer,
         flow_y_buffer: &wgpu::Buffer,
         new_channel_buffer: &wgpu::Buffer,
+        param_buffer: &wgpu::Buffer,
+        new_param_buffer: &wgpu::Buffer,
     ) -> Self {
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fl::ri_params"),
-            size: 36,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let ma = dd as f32 - sigma;
-        let mut ri_data = Vec::with_capacity(36);
+        let mut ri_data = Vec::with_capacity(32);
         ri_data.extend_from_slice(&(shape[0] as u32).to_le_bytes());
         ri_data.extend_from_slice(&(shape[1] as u32).to_le_bytes());
         ri_data.extend_from_slice(&(dd as i32).to_le_bytes());
         ri_data.extend_from_slice(&sigma.to_le_bytes());
         ri_data.extend_from_slice(&dt.to_le_bytes());
         ri_data.extend_from_slice(&(num_channels as u32).to_le_bytes());
+        ri_data.extend_from_slice(&(num_kernels as u32).to_le_bytes());
         ri_data.extend_from_slice(&ma.to_le_bytes());
-        ri_data.extend_from_slice(&basal_metabolic_rate.to_le_bytes());
-        ri_data.extend_from_slice(&kinetic_cost.to_le_bytes());
         queue.write_buffer(&params_buffer, 0, &ri_data);
 
         // Bind group layout
@@ -572,7 +572,15 @@ impl AdvectionPhase {
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::ri bgl"),
-            entries: &[sro(33), sro(34), sro(35), srw(36), unif(37)],
+            entries: &[
+                sro(33),
+                sro(34),
+                sro(35),
+                srw(36),
+                unif(37),
+                sro(38),
+                srw(39),
+            ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -616,6 +624,14 @@ impl AdvectionPhase {
                     binding: 37,
                     resource: params_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 38,
+                    resource: param_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 39,
+                    resource: new_param_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -628,6 +644,128 @@ impl AdvectionPhase {
 
     pub fn run(&self, encoder: &mut wgpu::CommandEncoder, wg_count: u32) {
         let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ri") });
+        p.set_pipeline(&self.pipeline);
+        p.set_bind_group(0, &self.bind_group, &[]);
+        p.dispatch_workgroups(wg_count, 1, 1);
+    }
+}
+
+// ===========================================================================
+// ParamAdvectionPhase: semi-Lagrangian advection of the parameter field
+// Uses the same flow field as density, weighted by total mass.
+// ===========================================================================
+
+pub struct ParamAdvectionPhase {
+    pipeline: wgpu::ComputePipeline,
+    bind_group: wgpu::BindGroup,
+}
+
+impl ParamAdvectionPhase {
+    pub fn new(
+        device: &wgpu::Device,
+        // Shared buffers
+        channel_buffer: &wgpu::Buffer,
+        flow_x_buffer: &wgpu::Buffer,
+        flow_y_buffer: &wgpu::Buffer,
+        param_buffer: &wgpu::Buffer,
+        new_param_buffer: &wgpu::Buffer,
+        ri_params_buffer: &wgpu::Buffer,
+    ) -> Self {
+        // Bind group layout
+        let sro = |b: u32| wgpu::BindGroupLayoutEntry {
+            binding: b,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let srw = |b: u32| wgpu::BindGroupLayoutEntry {
+            binding: b,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let unif = |b: u32| wgpu::BindGroupLayoutEntry {
+            binding: b,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fl::ri_param bgl"),
+            entries: &[sro(33), sro(34), sro(35), unif(37), sro(38), srw(39)],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fl::ri_param pl"),
+            bind_group_layouts: &[&bgl],
+            push_constant_ranges: &[],
+        });
+
+        let compute_sm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fl::compute"),
+            source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("fl::ri_param"),
+            layout: Some(&pipeline_layout),
+            module: &compute_sm,
+            entry_point: "reintegration_params_main",
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fl::ri_param bg"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 33,
+                    resource: channel_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 34,
+                    resource: flow_x_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 35,
+                    resource: flow_y_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 37,
+                    resource: ri_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 38,
+                    resource: param_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 39,
+                    resource: new_param_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        Self {
+            pipeline,
+            bind_group,
+        }
+    }
+
+    pub fn run(&self, encoder: &mut wgpu::CommandEncoder, wg_count: u32) {
+        let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ri_param"),
+        });
         p.set_pipeline(&self.pipeline);
         p.set_bind_group(0, &self.bind_group, &[]);
         p.dispatch_workgroups(wg_count, 1, 1);

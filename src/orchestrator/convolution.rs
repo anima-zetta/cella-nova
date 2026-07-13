@@ -39,6 +39,8 @@ pub struct ConvolutionPhase {
 
     // normalize_growth
     normalize_growth_pipeline: wgpu::ComputePipeline,
+
+    // Per-kernel normalize+growth bind groups
     normalize_growth_bgs: Vec<wgpu::BindGroup>,
 
     // Parameter buffers
@@ -61,6 +63,7 @@ impl ConvolutionPhase {
         // Shared buffers (references: owned by GpuFlowLenia)
         u_buffer: &wgpu::Buffer,
         conv_x_buffer: wgpu::Buffer,
+        param_buffer: &wgpu::Buffer,
     ) -> Self {
         // --- Twiddle factors (Stockham arrangement) ---
         let n = shape[0] as usize;
@@ -178,7 +181,7 @@ impl ConvolutionPhase {
         let normalize_growth_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("fl::normalize_growth bgl"),
-                entries: &[srw(8), srw(9), srw(10), unif(11), sro(12)],
+                entries: &[srw(8), srw(9), srw(10), unif(11), sro(12), sro(13)],
             });
         let fft_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::fft bgl"),
@@ -317,6 +320,14 @@ impl ConvolutionPhase {
                             buffer: &growth_params_buffer,
                             offset: (k as u64) * GP_STRIDE,
                             size: gp_size,
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 13,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: param_buffer,
+                            offset: u_offset,
+                            size: u_size,
                         }),
                     },
                 ],

@@ -15,7 +15,7 @@ mod phase2;
 
 use crate::wfft::WgpuContext;
 use convolution::ConvolutionPhase;
-use phase2::{AdvectionPhase, AggregationPhase, GradientFlowPhase};
+use phase2::{AdvectionPhase, AggregationPhase, GradientFlowPhase, ParamAdvectionPhase};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -41,8 +41,6 @@ pub struct GpuFlowLenia {
     num_kernels: usize,
     dd: i32,
     sigma: f32,
-    basal_metabolic_rate: f32,
-    kinetic_cost: f32,
 
     // Channel mapping
     c0: Vec<u32>,
@@ -59,6 +57,10 @@ pub struct GpuFlowLenia {
     new_channel_buffer: wgpu::Buffer,
     /// All kernels packed: [X*Y*k] vec2<f32>
     kernel_buffer: wgpu::Buffer,
+    /// Parameter field: [X*Y*K] f32
+    param_buffer: wgpu::Buffer,
+    /// Output of parameter advection: [X*Y*K] f32
+    new_param_buffer: wgpu::Buffer,
 
     // Readback
     readback_buffer: wgpu::Buffer,
@@ -68,6 +70,7 @@ pub struct GpuFlowLenia {
     aggregation: AggregationPhase,
     gradient_flow: GradientFlowPhase,
     advection: AdvectionPhase,
+    param_advection: ParamAdvectionPhase,
 }
 
 impl GpuFlowLenia {
@@ -85,8 +88,6 @@ impl GpuFlowLenia {
         dt: f32,
         dd: i32,
         sigma: f32,
-        basal_metabolic_rate: f32,
-        kinetic_cost: f32,
     ) -> Self {
         let device = &context.device;
         let queue = &context.queue;
@@ -133,6 +134,15 @@ impl GpuFlowLenia {
         let flow_x_buffer = make_storage("fl::flow_x", uc_size);
         let flow_y_buffer = make_storage("fl::flow_y", uc_size);
 
+        // Parameter field buffers: [X*Y*K] f32
+        let param_size = (total_elements * num_kernels * 4) as u64;
+        let param_buffer = make_storage("fl::param", param_size);
+        let new_param_buffer = make_storage("fl::new_param", param_size);
+
+        // Initialize param buffer to 1.0 (no effect on growth initially)
+        let ones: Vec<f32> = vec![1.0f32; total_elements * num_kernels];
+        queue.write_buffer(&param_buffer, 0, bytemuck::cast_slice(&ones));
+
         let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fl::readback"),
             size: buf_size,
@@ -154,6 +164,7 @@ impl GpuFlowLenia {
             conv_saved_buffer,
             &u_buffer,
             conv_x_buffer,
+            &param_buffer,
         );
 
         let aggregation = AggregationPhase::new(
@@ -188,15 +199,26 @@ impl GpuFlowLenia {
             queue,
             shape,
             num_channels,
+            num_kernels,
             dd,
             sigma,
             dt,
-            basal_metabolic_rate,
-            kinetic_cost,
             &channel_buffer,
             &flow_x_buffer,
             &flow_y_buffer,
             &new_channel_buffer,
+            &param_buffer,
+            &new_param_buffer,
+        );
+
+        let param_advection = ParamAdvectionPhase::new(
+            device,
+            &channel_buffer,
+            &flow_x_buffer,
+            &flow_y_buffer,
+            &param_buffer,
+            &new_param_buffer,
+            &advection.params_buffer,
         );
 
         GpuFlowLenia {
@@ -208,8 +230,6 @@ impl GpuFlowLenia {
             num_kernels,
             dd,
             sigma,
-            basal_metabolic_rate,
-            kinetic_cost,
             c0: c0.to_vec(),
             kernel_m: kernel_m.to_vec(),
             kernel_s: kernel_s.to_vec(),
@@ -217,11 +237,14 @@ impl GpuFlowLenia {
             channel_buffer,
             new_channel_buffer,
             kernel_buffer,
+            param_buffer,
+            new_param_buffer,
             readback_buffer,
             convolution,
             aggregation,
             gradient_flow,
             advection,
+            param_advection,
         }
     }
 
@@ -246,16 +269,15 @@ impl GpuFlowLenia {
     pub fn set_dt(&mut self, dt: f32) {
         self.dt = dt;
         let ma = self.dd as f32 - self.sigma;
-        let mut data = Vec::with_capacity(36);
+        let mut data = Vec::with_capacity(32);
         data.extend_from_slice(&(self.shape[0] as u32).to_le_bytes());
         data.extend_from_slice(&(self.shape[1] as u32).to_le_bytes());
         data.extend_from_slice(&(self.dd as i32).to_le_bytes());
         data.extend_from_slice(&self.sigma.to_le_bytes());
         data.extend_from_slice(&dt.to_le_bytes());
         data.extend_from_slice(&(self.num_channels as u32).to_le_bytes());
+        data.extend_from_slice(&(self.num_kernels as u32).to_le_bytes());
         data.extend_from_slice(&ma.to_le_bytes());
-        data.extend_from_slice(&self.basal_metabolic_rate.to_le_bytes());
-        data.extend_from_slice(&self.kinetic_cost.to_le_bytes());
         self.context
             .queue
             .write_buffer(&self.advection.params_buffer, 0, &data);
@@ -444,6 +466,7 @@ impl GpuFlowLenia {
         let total = self.total_elements as u32;
         let wg = (total + 255) / 256;
         let wg_c = ((total * self.num_channels as u32) + 255) / 256;
+        let wg_k = ((total * self.num_kernels as u32) + 255) / 256;
 
         // ================================================================
         // Phase 1: Per-kernel convolution + growth
@@ -485,13 +508,16 @@ impl GpuFlowLenia {
         // Phase 2b: Sobel gradients + flow field
         self.gradient_flow.run(&mut encoder, wg, wg_c);
 
-        // Phase 2c: Semi-Lagrangian advection
+        // Phase 2c: Semi-Lagrangian advection (density)
         self.advection.run(&mut encoder, wg_c);
+
+        // Phase 2d: Semi-Lagrangian advection (parameter field)
+        self.param_advection.run(&mut encoder, wg_k);
 
         queue.submit(Some(encoder.finish()));
 
         // ================================================================
-        // Phase 3: Swap new_channel → channel
+        // Phase 3: Swap new → current for both density and params
         // ================================================================
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -503,6 +529,13 @@ impl GpuFlowLenia {
             &self.channel_buffer,
             0,
             (self.total_elements * self.num_channels * 4) as u64,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.new_param_buffer,
+            0,
+            &self.param_buffer,
+            0,
+            (self.total_elements * self.num_kernels * 4) as u64,
         );
         queue.submit(Some(encoder.finish()));
     }

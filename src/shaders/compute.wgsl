@@ -144,6 +144,7 @@ struct GrowthParams { m: f32, s: f32, h: f32 }
 @group(0) @binding(10) var<storage, read_write> ng_conv_x: array<f32>;
 @group(0) @binding(11) var<uniform> ng_norm_params: NormalizeParams;
 @group(0) @binding(12) var<storage, read> ng_growth_params: GrowthParams;
+@group(0) @binding(13) var<storage, read> ng_params_field: array<f32>;
 
 @compute @workgroup_size(256)
 fn normalize_growth_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -153,7 +154,7 @@ fn normalize_growth_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let x: f32 = ng_data[i].x;
     let diff: f32 = x - ng_growth_params.m;
     let g: f32 = exp(-(diff * diff) / (2.0 * ng_growth_params.s * ng_growth_params.s));
-    ng_result[i] = (2.0 * g - 1.0) * ng_growth_params.h;
+    ng_result[i] = (2.0 * g - 1.0) * ng_growth_params.h * ng_params_field[i];
     ng_conv_x[i] = x;
 }
 
@@ -279,7 +280,7 @@ fn flow_field_main(@builtin(global_invocation_id) id: vec3<u32>) {
 // ---------------------------------------------------------------------------
 struct ReintegrationParams {
     width: u32, height: u32, dd: i32, sigma: f32, dt: f32,
-    num_channels: u32, ma: f32, basal_rate: f32, kinetic_cost: f32,
+    num_channels: u32, num_kernels: u32, ma: f32,
 }
 
 @group(0) @binding(33) var<storage, read> ri_channel: array<f32>;
@@ -287,6 +288,8 @@ struct ReintegrationParams {
 @group(0) @binding(35) var<storage, read> ri_flow_y: array<f32>;
 @group(0) @binding(36) var<storage, read_write> ri_new_channel: array<f32>;
 @group(0) @binding(37) var<uniform> ri_params: ReintegrationParams;
+@group(0) @binding(38) var<storage, read> ri_params_field: array<f32>;
+@group(0) @binding(39) var<storage, read_write> ri_new_params_field: array<f32>;
 
 @compute @workgroup_size(256)
 fn reintegration_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -333,9 +336,76 @@ fn reintegration_main(@builtin(global_invocation_id) id: vec3<u32>) {
             sum = sum + a * area;
         }
     }
-    let fx_self: f32 = clamp(ri_flow_x[idx], -ma, ma);
-    let fy_self: f32 = clamp(ri_flow_y[idx], -ma, ma);
-    let flow_mag: f32 = sqrt(fx_self * fx_self + fy_self * fy_self);
-    sum = sum * (1.0 - ri_params.basal_rate * dt) - ri_params.kinetic_cost * flow_mag * dt;
     ri_new_channel[idx] = max(sum, 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// reintegration_params: semi-Lagrangian advection of parameter field
+// Uses the same flow field as density, weighted by total mass.
+// (bindings 33-39, reusing ri_channel/ri_flow for density weighting)
+// ---------------------------------------------------------------------------
+
+@compute @workgroup_size(256)
+fn reintegration_params_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let idx: u32 = id.x;
+    let total: u32 = ri_params.width * ri_params.height * ri_params.num_kernels;
+    if (idx >= total) { return; }
+    let k: u32 = idx / (ri_params.width * ri_params.height);
+    let pixel: u32 = idx % (ri_params.width * ri_params.height);
+    let x: u32 = pixel % ri_params.width;
+    let y: u32 = pixel / ri_params.width;
+    let pos_x: f32 = f32(x) + 0.5;
+    let pos_y: f32 = f32(y) + 0.5;
+    let dd: i32 = ri_params.dd;
+    let sigma: f32 = ri_params.sigma;
+    let dt: f32 = ri_params.dt;
+    let ma: f32 = ri_params.ma;
+    let w: u32 = ri_params.width;
+    let h: u32 = ri_params.height;
+    let w_i32: i32 = i32(w);
+    let h_i32: i32 = i32(h);
+    let max_sz: f32 = min(1.0, 2.0 * sigma);
+    let area_norm: f32 = 4.0 * sigma * sigma;
+    let num_channels: u32 = ri_params.num_channels;
+    let k_base: u32 = k * w * h;
+    var sum_param: f32 = 0.0;
+    var total_weight: f32 = 0.0;
+    for (var dx: i32 = -dd; dx <= dd; dx = dx + 1) {
+        for (var dy: i32 = -dd; dy <= dd; dy = dy + 1) {
+            let nx: i32 = i32(x) + dx;
+            let ny: i32 = i32(y) + dy;
+            if (nx < 0 || nx >= w_i32 || ny < 0 || ny >= h_i32) { continue; }
+            let n_idx: u32 = u32(ny) * w + u32(nx);
+            // Compute total density at neighbor (sum over channels)
+            var total_a: f32 = 0.0;
+            for (var c: u32 = 0u; c < num_channels; c = c + 1u) {
+                total_a = total_a + ri_channel[c * w * h + n_idx];
+            }
+            if (total_a <= 0.0) { continue; }
+            // Compute density-weighted average area from per-channel flow
+            var weight: f32 = 0.0;
+            for (var c: u32 = 0u; c < num_channels; c = c + 1u) {
+                let c_base: u32 = c * w * h;
+                let n_pos_x: f32 = f32(nx) + 0.5;
+                let n_pos_y: f32 = f32(ny) + 0.5;
+                let fx: f32 = clamp(ri_flow_x[c_base + n_idx], -ma, ma);
+                let fy: f32 = clamp(ri_flow_y[c_base + n_idx], -ma, ma);
+                let mu_x: f32 = clamp(n_pos_x + fx * dt, sigma, f32(w) - sigma);
+                let mu_y: f32 = clamp(n_pos_y + fy * dt, sigma, f32(h) - sigma);
+                let dpx: f32 = abs(pos_x - mu_x);
+                let dpy: f32 = abs(pos_y - mu_y);
+                let sz_x: f32 = clamp(0.5 - dpx + sigma, 0.0, max_sz);
+                let sz_y: f32 = clamp(0.5 - dpy + sigma, 0.0, max_sz);
+                let area: f32 = (sz_x * sz_y) / area_norm;
+                weight = weight + area * ri_channel[c_base + n_idx];
+            }
+            total_weight = total_weight + weight;
+            sum_param = sum_param + ri_params_field[k_base + n_idx] * weight;
+        }
+    }
+    if (total_weight > 0.0) {
+        ri_new_params_field[idx] = sum_param / total_weight;
+    } else {
+        ri_new_params_field[idx] = ri_params_field[idx];
+    }
 }
