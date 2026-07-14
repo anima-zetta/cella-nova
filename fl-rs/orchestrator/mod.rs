@@ -72,6 +72,10 @@ pub struct GpuFlowLenia {
     gradient_flow: GradientFlowPhase,
     advection: AdvectionPhase,
     param_advection: ParamAdvectionPhase,
+
+    // Total mass buffer (sum of all channels), shared between gradient_flow and param_advection
+    #[allow(dead_code)]
+    sum_a_buffer: wgpu::Buffer,
 }
 
 impl GpuFlowLenia {
@@ -189,7 +193,7 @@ impl GpuFlowLenia {
             nabla_u_y_buffer,
             nabla_a_x_buffer,
             nabla_a_y_buffer,
-            sum_a_buffer,
+            &sum_a_buffer,
         );
 
         let advection = AdvectionPhase::new(
@@ -216,6 +220,7 @@ impl GpuFlowLenia {
             &channel_buffer,
             &flow_x_buffer,
             &flow_y_buffer,
+            &sum_a_buffer,
             &param_buffer,
             &new_param_buffer,
             &advection.params_buffer,
@@ -233,6 +238,7 @@ impl GpuFlowLenia {
             kernel_buffer,
             param_buffer,
             new_param_buffer,
+            sum_a_buffer,
             convolution,
             aggregation,
             gradient_flow,

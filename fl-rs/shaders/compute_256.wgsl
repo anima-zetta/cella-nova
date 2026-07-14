@@ -420,10 +420,10 @@ fn reintegration_main(@builtin(global_invocation_id) id: vec3<u32>) {
             let a: f32 = ri_channel[c_base + n_idx];
             let n_pos_x: f32 = f32(nx) + 0.5;
             let n_pos_y: f32 = f32(ny) + 0.5;
-            let fx: f32 = clamp(ri_flow_x[c_base + n_idx], -ma, ma);
-            let fy: f32 = clamp(ri_flow_y[c_base + n_idx], -ma, ma);
-            let mu_x: f32 = clamp(n_pos_x + fx * dt, sigma, f32(w) - sigma);
-            let mu_y: f32 = clamp(n_pos_y + fy * dt, sigma, f32(h) - sigma);
+            let fx: f32 = ri_flow_x[c_base + n_idx];
+            let fy: f32 = ri_flow_y[c_base + n_idx];
+            let mu_x: f32 = clamp(n_pos_x + clamp(fx * dt, -ma, ma), sigma, f32(w) - sigma);
+            let mu_y: f32 = clamp(n_pos_y + clamp(fy * dt, -ma, ma), sigma, f32(h) - sigma);
             let dpx: f32 = abs(pos_x - mu_x);
             let dpy: f32 = abs(pos_y - mu_y);
             let sz_x: f32 = clamp(0.5 - dpx + sigma, 0.0, max_sz);
@@ -437,9 +437,11 @@ fn reintegration_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // ---------------------------------------------------------------------------
 // reintegration_params: semi-Lagrangian advection of parameter field
-// Uses the same flow field as density, weighted by total mass.
-// (bindings 34-40, reusing ri_channel/ri_flow for density weighting)
+// Uses the total mass (sum of all channels) as the weighting factor.
+// (bindings 33-35, 37-40)
 // ---------------------------------------------------------------------------
+
+@group(0) @binding(40) var<storage, read> ri_sum_a: array<f32>;
 
 @compute @workgroup_size(256)
 fn reintegration_params_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -471,13 +473,13 @@ fn reintegration_params_main(@builtin(global_invocation_id) id: vec3<u32>) {
             let ny: i32 = i32(y) + dy;
             if (nx < 0 || nx >= w_i32 || ny < 0 || ny >= h_i32) { continue; }
             let n_idx: u32 = u32(ny) * w + u32(nx);
-            let a: f32 = ri_channel[n_idx];
+            let a: f32 = ri_sum_a[n_idx];
             let n_pos_x: f32 = f32(nx) + 0.5;
             let n_pos_y: f32 = f32(ny) + 0.5;
-            let fx: f32 = clamp(ri_flow_x[n_idx], -ma, ma);
-            let fy: f32 = clamp(ri_flow_y[n_idx], -ma, ma);
-            let mu_x: f32 = clamp(n_pos_x + fx * dt, sigma, f32(w) - sigma);
-            let mu_y: f32 = clamp(n_pos_y + fy * dt, sigma, f32(h) - sigma);
+            let fx: f32 = ri_flow_x[n_idx];
+            let fy: f32 = ri_flow_y[n_idx];
+            let mu_x: f32 = clamp(n_pos_x + clamp(fx * dt, -ma, ma), sigma, f32(w) - sigma);
+            let mu_y: f32 = clamp(n_pos_y + clamp(fy * dt, -ma, ma), sigma, f32(h) - sigma);
             let dpx: f32 = abs(pos_x - mu_x);
             let dpy: f32 = abs(pos_y - mu_y);
             let sz_x: f32 = clamp(0.5 - dpx + sigma, 0.0, max_sz);

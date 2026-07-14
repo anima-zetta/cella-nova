@@ -209,7 +209,7 @@ impl GradientFlowPhase {
         nabla_u_y_buffer: wgpu::Buffer,
         nabla_a_x_buffer: wgpu::Buffer,
         nabla_a_y_buffer: wgpu::Buffer,
-        sum_a_buffer: wgpu::Buffer,
+        sum_a_buffer: &wgpu::Buffer,
     ) -> Self {
         let make_uniform = |label: &str, size: u64| -> wgpu::Buffer {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -669,6 +669,7 @@ impl ParamAdvectionPhase {
         channel_buffer: &wgpu::Buffer,
         flow_x_buffer: &wgpu::Buffer,
         flow_y_buffer: &wgpu::Buffer,
+        sum_a_buffer: &wgpu::Buffer,
         param_buffer: &wgpu::Buffer,
         new_param_buffer: &wgpu::Buffer,
         ri_params_buffer: &wgpu::Buffer,
@@ -707,7 +708,15 @@ impl ParamAdvectionPhase {
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::ri_param bgl"),
-            entries: &[sro(33), sro(34), sro(35), unif(37), sro(38), srw(39)],
+            entries: &[
+                sro(33),
+                sro(34),
+                sro(35),
+                sro(40),
+                unif(37),
+                sro(38),
+                srw(39),
+            ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -742,6 +751,10 @@ impl ParamAdvectionPhase {
                 wgpu::BindGroupEntry {
                     binding: 35,
                     resource: flow_y_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 40,
+                    resource: sum_a_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 37,

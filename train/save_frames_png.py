@@ -20,21 +20,21 @@ parser.add_argument("--grid-size", type=int, default=64, choices=[64, 128, 256, 
 args = parser.parse_args()
 
 GRID = args.grid_size
-SX, SY, nb_k, C = GRID, GRID, 2, 2
+SX, SY, nb_k, C = GRID, GRID, 3, 3
 
 params = Params(
-    r=jnp.array([0.5, 0.8]),
-    b=jnp.array([[0.5, 0.3, 0.0], [0.7, 0.2, 0.0]]),
-    w=jnp.array([[0.1, 0.05, 0.01], [0.08, 0.06, 0.01]]),
-    a=jnp.array([[0.0, 0.5, 0.0], [0.0, 0.4, 0.0]]),
-    m=jnp.array([0.1, 0.15]),
-    s=jnp.array([0.05, 0.08]),
-    h=jnp.array([0.5, 0.8]),
+    r=jnp.array([0.5, 0.8, 0.65]),
+    b=jnp.array([[0.5, 0.3, 0.0], [0.7, 0.2, 0.0], [0.6, 0.25, 0.0]]),
+    w=jnp.array([[0.1, 0.05, 0.01], [0.08, 0.06, 0.01], [0.09, 0.055, 0.01]]),
+    a=jnp.array([[0.0, 0.5, 0.0], [0.0, 0.4, 0.0], [0.0, 0.45, 0.0]]),
+    m=jnp.array([0.1, 0.15, 0.12]),
+    s=jnp.array([0.05, 0.08, 0.065]),
+    h=jnp.array([0.5, 0.8, 0.65]),
     R=10.0,
 )
 
-c0 = [0, 1]
-c1 = [[0], [1]]
+c0 = [0, 1, 2]
+c1 = [[0], [1], [2]]
 
 config = Config(
     SX=SX, SY=SY, nb_k=nb_k, C=C,
@@ -85,4 +85,4 @@ for step in range(1, 51):
     save_frame(arr, step)
 
 print(f"Saved 51 Python frames (step 0 + 50 steps) to pngs/ ({GRID}x{GRID})")
-print(f"  py_frame_0000.png through py_frame_0050.png")
+print("  py_frame_0000.png through py_frame_0050.png")

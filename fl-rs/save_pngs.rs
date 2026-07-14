@@ -19,14 +19,14 @@ fn sigmoid(x: f32) -> f32 {
 
 fn generate_kernels_fft(size: usize) -> Vec<Vec<num_complex::Complex32>> {
     let mid = size as i32 / 2;
-    let num_kernels = 2;
+    let num_kernels = 3;
 
     // Parameters matching reference/save_pngs.rs and train/save_frames_png.py
     let global_r = 10.0f32;
-    let radii: [f32; 2] = [0.5, 0.8];
-    let a: [[f32; 3]; 2] = [[0.0, 0.5, 0.0], [0.0, 0.4, 0.0]];
-    let w: [[f32; 3]; 2] = [[0.1, 0.05, 0.01], [0.08, 0.06, 0.01]];
-    let b: [[f32; 3]; 2] = [[0.5, 0.3, 0.0], [0.7, 0.2, 0.0]];
+    let radii: [f32; 3] = [0.5, 0.8, 0.65];
+    let a: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [0.0, 0.4, 0.0], [0.0, 0.45, 0.0]];
+    let w: [[f32; 3]; 3] = [[0.1, 0.05, 0.01], [0.08, 0.06, 0.01], [0.09, 0.055, 0.01]];
+    let b: [[f32; 3]; 3] = [[0.5, 0.3, 0.0], [0.7, 0.2, 0.0], [0.6, 0.25, 0.0]];
 
     let mut kernels = Vec::with_capacity(num_kernels);
     for k in 0..num_kernels {
@@ -182,21 +182,21 @@ fn main() {
     );
 
     let shape = grid_size.next_power_of_two();
-    let num_channels: usize = 2;
-    let num_kernels: usize = 2;
+    let num_channels: usize = 3;
+    let num_kernels: usize = 3;
     let num_steps: usize = 50;
 
-    let c0: Vec<u32> = vec![0, 1];
-    let c1: Vec<Vec<u32>> = vec![vec![0], vec![1]];
+    let c0: Vec<u32> = vec![0, 1, 2];
+    let c1: Vec<Vec<u32>> = vec![vec![0], vec![1], vec![2]];
 
     let dt: f32 = 0.2;
     let dd: i32 = 5;
     let sigma: f32 = 0.65;
 
     // Growth params matching reference
-    let kernel_m: Vec<f32> = vec![0.1, 0.15];
-    let kernel_s: Vec<f32> = vec![0.05, 0.08];
-    let kernel_h: Vec<f32> = vec![0.5, 0.8];
+    let kernel_m: Vec<f32> = vec![0.1, 0.15, 0.12];
+    let kernel_s: Vec<f32> = vec![0.05, 0.08, 0.065];
+    let kernel_h: Vec<f32> = vec![0.5, 0.8, 0.65];
 
     // --- wgpu setup (headless, no window) ---
     let instance = wgpu::Instance::default();

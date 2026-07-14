@@ -15,13 +15,13 @@ use rustfft::FftPlanner;
 // Math utilities
 // ---------------------------------------------------------------------------
 
-fn sigmoid(x: f64) -> f64 {
+fn sigmoid(x: f32) -> f32 {
     0.5 * ((x / 2.0).tanh() + 1.0)
 }
 
 /// ker_f(x, a, w, b) = sum_p b[p] * exp(-(x - a[p])^2 / w[p])
-fn ker_f(x: &Array2<f64>, a: &[f64], w: &[f64], b: &[f64]) -> Array2<f64> {
-    let mut out = Array2::<f64>::zeros(x.dim());
+fn ker_f(x: &Array2<f32>, a: &[f32], w: &[f32], b: &[f32]) -> Array2<f32> {
+    let mut out = Array2::<f32>::zeros(x.dim());
     for p in 0..a.len() {
         let diff = x - a[p];
         out = out + b[p] * (&diff * &diff).mapv(|v| (-v / w[p]).exp());
@@ -29,13 +29,13 @@ fn ker_f(x: &Array2<f64>, a: &[f64], w: &[f64], b: &[f64]) -> Array2<f64> {
     out
 }
 
-fn bell(x: f64, m: f64, s: f64) -> f64 {
+fn bell(x: f32, m: f32, s: f32) -> f32 {
     (-((x - m) / s).powi(2) / 2.0).exp()
 }
 
-fn growth(U: &Array3<f64>, m: &Array1<f64>, s: &Array1<f64>) -> Array3<f64> {
+fn growth(U: &Array3<f32>, m: &Array1<f32>, s: &Array1<f32>) -> Array3<f32> {
     let (sx, sy, nb_k) = U.dim();
-    let mut out = Array3::<f64>::zeros((sx, sy, nb_k));
+    let mut out = Array3::<f32>::zeros((sx, sy, nb_k));
     for k in 0..nb_k {
         let uk = U.slice(s![.., .., k]);
         let gk = uk.mapv(|u| bell(u, m[k], s[k]) * 2.0 - 1.0);
@@ -48,13 +48,13 @@ fn growth(U: &Array3<f64>, m: &Array1<f64>, s: &Array1<f64>) -> Array3<f64> {
 // Sobel operators
 // ---------------------------------------------------------------------------
 
-const KX: [[f64; 3]; 3] = [[1.0, 0.0, -1.0], [2.0, 0.0, -2.0], [1.0, 0.0, -1.0]];
-const KY: [[f64; 3]; 3] = [[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]];
+const KX: [[f32; 3]; 3] = [[1.0, 0.0, -1.0], [2.0, 0.0, -2.0], [1.0, 0.0, -1.0]];
+const KY: [[f32; 3]; 3] = [[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]];
 
 /// 2D convolution with 'same' mode for a 3x3 kernel
-fn convolve2d_same_3x3(arr: &Array2<f64>, kernel: &[[f64; 3]; 3]) -> Array2<f64> {
+fn convolve2d_same_3x3(arr: &Array2<f32>, kernel: &[[f32; 3]; 3]) -> Array2<f32> {
     let (h, w) = arr.dim();
-    let mut out = Array2::<f64>::zeros((h, w));
+    let mut out = Array2::<f32>::zeros((h, w));
     for i in 0..h {
         for j in 0..w {
             let mut sum = 0.0;
@@ -74,9 +74,9 @@ fn convolve2d_same_3x3(arr: &Array2<f64>, kernel: &[[f64; 3]; 3]) -> Array2<f64>
     out
 }
 
-fn sobel_x(A: &Array3<f64>) -> Array3<f64> {
+fn sobel_x(A: &Array3<f32>) -> Array3<f32> {
     let (sx, sy, c) = A.dim();
-    let mut out = Array3::<f64>::zeros((sx, sy, c));
+    let mut out = Array3::<f32>::zeros((sx, sy, c));
     for ch in 0..c {
         let slice = A.slice(s![.., .., ch]);
         let conv = convolve2d_same_3x3(&slice.to_owned(), &KX);
@@ -85,9 +85,9 @@ fn sobel_x(A: &Array3<f64>) -> Array3<f64> {
     out
 }
 
-fn sobel_y(A: &Array3<f64>) -> Array3<f64> {
+fn sobel_y(A: &Array3<f32>) -> Array3<f32> {
     let (sx, sy, c) = A.dim();
-    let mut out = Array3::<f64>::zeros((sx, sy, c));
+    let mut out = Array3::<f32>::zeros((sx, sy, c));
     for ch in 0..c {
         let slice = A.slice(s![.., .., ch]);
         let conv = convolve2d_same_3x3(&slice.to_owned(), &KY);
@@ -97,7 +97,7 @@ fn sobel_y(A: &Array3<f64>) -> Array3<f64> {
 }
 
 /// Returns array of shape (SX, SY, 2, C) — [dy, dx] gradients
-fn sobel(A: &Array3<f64>) -> Array4<f64> {
+fn sobel(A: &Array3<f32>) -> Array4<f32> {
     let sy = sobel_y(A).insert_axis(Axis(2)); // (SX, SY, 1, C)
     let sx = sobel_x(A).insert_axis(Axis(2)); // (SX, SY, 1, C)
     concatenate(Axis(2), &[sy.view(), sx.view()]).unwrap() // (SX, SY, 2, C)
@@ -107,29 +107,29 @@ fn sobel(A: &Array3<f64>) -> Array4<f64> {
 // Kernel generation
 // ---------------------------------------------------------------------------
 
-fn get_kernels(SX: usize, SY: usize, nb_k: usize, params: &Params) -> Array3<f64> {
+fn get_kernels(SX: usize, SY: usize, nb_k: usize, params: &Params) -> Array3<f32> {
     let mid = SX as i32 / 2;
     let _size = SX.min(SY);
-    let mut Ds: Vec<Array2<f64>> = Vec::with_capacity(nb_k);
+    let mut Ds: Vec<Array2<f32>> = Vec::with_capacity(nb_k);
     for k in 0..nb_k {
-        let mut dist = Array2::<f64>::zeros((SY, SX));
+        let mut dist = Array2::<f32>::zeros((SY, SX));
         for i in 0..SY {
             for j in 0..SX {
                 let di = i as i32 - mid;
                 let dj = j as i32 - mid;
-                let d = ((di * di + dj * dj) as f64).sqrt();
+                let d = ((di * di + dj * dj) as f32).sqrt();
                 dist[[i, j]] = d / ((params.R + 15.0) * params.r[k]);
             }
         }
         Ds.push(dist);
     }
 
-    let mut K = Array3::<f64>::zeros((SY, SX, nb_k));
+    let mut K = Array3::<f32>::zeros((SY, SX, nb_k));
     for (k, D) in Ds.iter().enumerate() {
         let sig = D.mapv(|d| sigmoid(-(d - 1.0) * 10.0));
-        let a: Vec<f64> = params.a.row(k).to_vec();
-        let w: Vec<f64> = params.w.row(k).to_vec();
-        let b: Vec<f64> = params.b.row(k).to_vec();
+        let a: Vec<f32> = params.a.row(k).to_vec();
+        let w: Vec<f32> = params.w.row(k).to_vec();
+        let b: Vec<f32> = params.b.row(k).to_vec();
         let kf = ker_f(D, &a, &w, &b);
         let mut kslice = sig * kf;
         let total = kslice.sum();
@@ -183,18 +183,18 @@ fn conn_from_lists(c0: &[usize], c1: &[Vec<usize>], C: usize) -> (Vec<usize>, Ve
 // ---------------------------------------------------------------------------
 
 struct Fft2DPlanner {
-    planner: FftPlanner<f64>,
+    planner: FftPlanner<f32>,
 }
 
 impl Fft2DPlanner {
     fn new() -> Self {
         Self {
-            planner: FftPlanner::<f64>::new(),
+            planner: FftPlanner::<f32>::new(),
         }
     }
 
     /// 2D FFT along axes (0, 1) for each slice along the last axis
-    fn fft2(&mut self, arr: &Array3<Complex<f64>>) -> Array3<Complex<f64>> {
+    fn fft2(&mut self, arr: &Array3<Complex<f32>>) -> Array3<Complex<f32>> {
         let (sx, sy, k) = arr.dim();
         let mut result = arr.clone();
 
@@ -202,7 +202,7 @@ impl Fft2DPlanner {
         let fft_rows = self.planner.plan_fft_forward(sy);
         for k_idx in 0..k {
             for i in 0..sx {
-                let mut row: Vec<Complex<f64>> = (0..sy).map(|j| result[[i, j, k_idx]]).collect();
+                let mut row: Vec<Complex<f32>> = (0..sy).map(|j| result[[i, j, k_idx]]).collect();
                 fft_rows.process(&mut row);
                 for j in 0..sy {
                     result[[i, j, k_idx]] = row[j];
@@ -214,7 +214,7 @@ impl Fft2DPlanner {
         let fft_cols = self.planner.plan_fft_forward(sx);
         for k_idx in 0..k {
             for j in 0..sy {
-                let mut col: Vec<Complex<f64>> = (0..sx).map(|i| result[[i, j, k_idx]]).collect();
+                let mut col: Vec<Complex<f32>> = (0..sx).map(|i| result[[i, j, k_idx]]).collect();
                 fft_cols.process(&mut col);
                 for i in 0..sx {
                     result[[i, j, k_idx]] = col[i];
@@ -227,7 +227,7 @@ impl Fft2DPlanner {
 
     /// 2D IFFT along axes (0, 1) for each slice along the last axis
     /// Note: rustfft's inverse FFT does NOT normalize, so we divide by sx*sy manually.
-    fn ifft2(&mut self, arr: &Array3<Complex<f64>>) -> Array3<Complex<f64>> {
+    fn ifft2(&mut self, arr: &Array3<Complex<f32>>) -> Array3<Complex<f32>> {
         let (sx, sy, k) = arr.dim();
         let mut result = arr.clone();
 
@@ -235,7 +235,7 @@ impl Fft2DPlanner {
         let ifft_rows = self.planner.plan_fft_inverse(sy);
         for k_idx in 0..k {
             for i in 0..sx {
-                let mut row: Vec<Complex<f64>> = (0..sy).map(|j| result[[i, j, k_idx]]).collect();
+                let mut row: Vec<Complex<f32>> = (0..sy).map(|j| result[[i, j, k_idx]]).collect();
                 ifft_rows.process(&mut row);
                 for j in 0..sy {
                     result[[i, j, k_idx]] = row[j];
@@ -247,7 +247,7 @@ impl Fft2DPlanner {
         let ifft_cols = self.planner.plan_fft_inverse(sx);
         for k_idx in 0..k {
             for j in 0..sy {
-                let mut col: Vec<Complex<f64>> = (0..sx).map(|i| result[[i, j, k_idx]]).collect();
+                let mut col: Vec<Complex<f32>> = (0..sx).map(|i| result[[i, j, k_idx]]).collect();
                 ifft_cols.process(&mut col);
                 for i in 0..sx {
                     result[[i, j, k_idx]] = col[i];
@@ -256,16 +256,16 @@ impl Fft2DPlanner {
         }
 
         // Normalize: rustfft's inverse FFT does NOT divide by n, so we must divide by sx*sy
-        let norm = (sx * sy) as f64;
+        let norm = (sx * sy) as f32;
         result.mapv_inplace(|v| v / norm);
         result
     }
 }
 
 /// fftshift along axes (0, 1) for a 2D array
-fn fftshift_2d(arr: &Array2<Complex<f64>>) -> Array2<Complex<f64>> {
+fn fftshift_2d(arr: &Array2<Complex<f32>>) -> Array2<Complex<f32>> {
     let (nrows, ncols) = arr.dim();
-    let mut result = Array2::<Complex<f64>>::zeros((nrows, ncols));
+    let mut result = Array2::<Complex<f32>>::zeros((nrows, ncols));
     let half_rows = nrows / 2;
     let half_cols = ncols / 2;
     for i in 0..nrows {
@@ -279,9 +279,9 @@ fn fftshift_2d(arr: &Array2<Complex<f64>>) -> Array2<Complex<f64>> {
 }
 
 /// ifftshift along axes (0, 1) for a 2D array
-fn ifftshift_2d(arr: &Array2<Complex<f64>>) -> Array2<Complex<f64>> {
+fn ifftshift_2d(arr: &Array2<Complex<f32>>) -> Array2<Complex<f32>> {
     let (nrows, ncols) = arr.dim();
-    let mut result = Array2::<Complex<f64>>::zeros((nrows, ncols));
+    let mut result = Array2::<Complex<f32>>::zeros((nrows, ncols));
     let half_rows = (nrows + 1) / 2;
     let half_cols = (ncols + 1) / 2;
     for i in 0..nrows {
@@ -295,9 +295,9 @@ fn ifftshift_2d(arr: &Array2<Complex<f64>>) -> Array2<Complex<f64>> {
 }
 
 /// fftshift for a 3D array along axes (0, 1)
-fn fftshift_3d(arr: &Array3<Complex<f64>>) -> Array3<Complex<f64>> {
+fn fftshift_3d(arr: &Array3<Complex<f32>>) -> Array3<Complex<f32>> {
     let (sx, sy, k) = arr.dim();
-    let mut result = Array3::<Complex<f64>>::zeros((sx, sy, k));
+    let mut result = Array3::<Complex<f32>>::zeros((sx, sy, k));
     let half_rows = sx / 2;
     let half_cols = sy / 2;
     for i in 0..sx {
@@ -319,16 +319,16 @@ fn fftshift_3d(arr: &Array3<Complex<f64>>) -> Array3<Complex<f64>> {
 fn build_reintegration(
     SX: usize,
     SY: usize,
-    dt: f64,
+    dt: f32,
     dd: i32,
-    sigma: f64,
+    sigma: f32,
     border: &str,
-) -> Box<dyn Fn(&Array3<f64>, &Array4<f64>) -> Array3<f64>> {
+) -> Box<dyn Fn(&Array3<f32>, &Array4<f32>) -> Array3<f32>> {
     // Build position grid
-    let pos_y = Array2::from_shape_fn((SY, SX), |(i, _j)| i as f64 + 0.5);
-    let pos_x = Array2::from_shape_fn((SY, SX), |(_i, j)| j as f64 + 0.5);
+    let pos_y = Array2::from_shape_fn((SY, SX), |(i, _j)| i as f32 + 0.5);
+    let pos_x = Array2::from_shape_fn((SY, SX), |(_i, j)| j as f32 + 0.5);
     // pos as (SY, SX, 2) — [y, x]
-    let mut pos = Array3::<f64>::zeros((SY, SX, 2));
+    let mut pos = Array3::<f32>::zeros((SY, SX, 2));
     pos.slice_mut(s![.., .., 0]).assign(&pos_y);
     pos.slice_mut(s![.., .., 1]).assign(&pos_x);
 
@@ -347,13 +347,13 @@ fn build_reintegration(
 
     let border_owned = border.to_string();
 
-    Box::new(move |X: &Array3<f64>, F: &Array4<f64>| {
+    Box::new(move |X: &Array3<f32>, F: &Array4<f32>| {
         // F has shape (SX, SY, 2, C) — [dy, dx] gradients
         let (sx, sy, _two, c) = F.dim();
-        let ma = dd as f64 - sigma;
+        let ma = dd as f32 - sigma;
 
         // mu = pos + clip(dt * F, -ma, ma)  — shape (SX, SY, 2, C)
-        let mut mu = Array4::<f64>::zeros((sx, sy, 2, c));
+        let mut mu = Array4::<f32>::zeros((sx, sy, 2, c));
         for ci in 0..c {
             for a in 0..2 {
                 let f_slice = F.slice(s![.., .., a, ci]);
@@ -368,13 +368,13 @@ fn build_reintegration(
             for ci in 0..c {
                 for a in 0..2 {
                     let mut mu_slice = mu.slice_mut(s![.., .., a, ci]);
-                    mu_slice.mapv_inplace(|v| v.clamp(sigma, SX as f64 - sigma));
+                    mu_slice.mapv_inplace(|v| v.clamp(sigma, SX as f32 - sigma));
                 }
             }
         }
 
         // Accumulate over all offsets
-        let mut result = Array3::<f64>::zeros((sx, sy, c));
+        let mut result = Array3::<f32>::zeros((sx, sy, c));
         for oi in 0..n_offsets {
             let dx = dxs[oi];
             let dy = dys[oi];
@@ -384,7 +384,7 @@ fn build_reintegration(
             let mur = roll_4d_axes01(&mu, dx, dy);
 
             // dpmu = |pos - mur|
-            let mut dpmu = Array4::<f64>::zeros((sx, sy, 2, c));
+            let mut dpmu = Array4::<f32>::zeros((sx, sy, 2, c));
             for ci in 0..c {
                 for a in 0..2 {
                     let p_slice = pos.slice(s![.., .., a]);
@@ -397,10 +397,10 @@ fn build_reintegration(
             // sz = 0.5 - dpmu + sigma
             let sz = dpmu.mapv(|v| 0.5 - v + sigma);
             // clip sz to [0, min(1, 2*sigma)]
-            let clip_max = 1.0_f64.min(2.0 * sigma);
+            let clip_max = 1.0_f32.min(2.0 * sigma);
             let sz_clipped = sz.mapv(|v| v.clamp(0.0, clip_max));
             // area = prod(sz, axis=2) / (4*sigma^2)
-            let mut area = Array2::<f64>::zeros((sx, sy));
+            let mut area = Array2::<f32>::zeros((sx, sy));
             for ci in 0..c {
                 for i in 0..sx {
                     for j in 0..sy {
@@ -424,16 +424,16 @@ fn build_reintegration(
 fn build_reintegration_p(
     SX: usize,
     SY: usize,
-    dt: f64,
+    dt: f32,
     dd: i32,
-    sigma: f64,
+    sigma: f32,
     border: &str,
     hidden_dims: usize,
     mix: &str,
-) -> Box<dyn Fn(&Array3<f64>, &Array3<f64>, &Array4<f64>) -> (Array3<f64>, Array3<f64>)> {
-    let pos_y = Array2::from_shape_fn((SY, SX), |(i, _j)| i as f64 + 0.5);
-    let pos_x = Array2::from_shape_fn((SY, SX), |(_i, j)| j as f64 + 0.5);
-    let mut pos = Array3::<f64>::zeros((SY, SX, 2));
+) -> Box<dyn Fn(&Array3<f32>, &Array3<f32>, &Array4<f32>) -> (Array3<f32>, Array3<f32>)> {
+    let pos_y = Array2::from_shape_fn((SY, SX), |(i, _j)| i as f32 + 0.5);
+    let pos_x = Array2::from_shape_fn((SY, SX), |(_i, j)| j as f32 + 0.5);
+    let mut pos = Array3::<f32>::zeros((SY, SX, 2));
     pos.slice_mut(s![.., .., 0]).assign(&pos_y);
     pos.slice_mut(s![.., .., 1]).assign(&pos_x);
 
@@ -452,11 +452,11 @@ fn build_reintegration_p(
     let border_owned = border.to_string();
     let mix_owned = mix.to_string();
 
-    Box::new(move |X: &Array3<f64>, H: &Array3<f64>, F: &Array4<f64>| {
+    Box::new(move |X: &Array3<f32>, H: &Array3<f32>, F: &Array4<f32>| {
         let (sx, sy, _two, c) = F.dim();
-        let ma = dd as f64 - sigma;
+        let ma = dd as f32 - sigma;
 
-        let mut mu = Array4::<f64>::zeros((sx, sy, 2, c));
+        let mut mu = Array4::<f32>::zeros((sx, sy, 2, c));
         for ci in 0..c {
             for a in 0..2 {
                 let f_slice = F.slice(s![.., .., a, ci]);
@@ -471,13 +471,13 @@ fn build_reintegration_p(
             for ci in 0..c {
                 for a in 0..2 {
                     let mut mu_slice = mu.slice_mut(s![.., .., a, ci]);
-                    mu_slice.mapv_inplace(|v| v.clamp(sigma, SX as f64 - sigma));
+                    mu_slice.mapv_inplace(|v| v.clamp(sigma, SX as f32 - sigma));
                 }
             }
         }
 
-        let mut nX_sum = Array3::<f64>::zeros((sx, sy, c));
-        let mut nH_sum = Array3::<f64>::zeros((sx, sy, hidden_dims));
+        let mut nX_sum = Array3::<f32>::zeros((sx, sy, c));
+        let mut nH_sum = Array3::<f32>::zeros((sx, sy, hidden_dims));
 
         for oi in 0..n_offsets {
             let dx = dxs[oi];
@@ -487,7 +487,7 @@ fn build_reintegration_p(
             let Hr = roll_3d_axes01(H, dx, dy);
             let mur = roll_4d_axes01(&mu, dx, dy);
 
-            let mut dpmu = Array4::<f64>::zeros((sx, sy, 2, c));
+            let mut dpmu = Array4::<f32>::zeros((sx, sy, 2, c));
             for ci in 0..c {
                 for a in 0..2 {
                     let p_slice = pos.slice(s![.., .., a]);
@@ -498,10 +498,10 @@ fn build_reintegration_p(
             }
 
             let sz = dpmu.mapv(|v| 0.5 - v + sigma);
-            let clip_max = 1.0_f64.min(2.0 * sigma);
+            let clip_max = 1.0_f32.min(2.0 * sigma);
             let sz_clipped = sz.mapv(|v| v.clamp(0.0, clip_max));
 
-            let mut area = Array2::<f64>::zeros((sx, sy));
+            let mut area = Array2::<f32>::zeros((sx, sy));
             for ci in 0..c {
                 for i in 0..sx {
                     for j in 0..sy {
@@ -533,7 +533,7 @@ fn build_reintegration_p(
                 // nX = sum(nX, axis=0)
                 // nH = nH / (nX.sum(-1, keepdims=True) + 1e-10)
                 let nX_ch_sum = nX_sum.sum_axis(Axis(2)); // (SX, SY)
-                let mut nH_avg = Array3::<f64>::zeros((sx, sy, hidden_dims));
+                let mut nH_avg = Array3::<f32>::zeros((sx, sy, hidden_dims));
                 for k_idx in 0..hidden_dims {
                     for i in 0..sx {
                         for j in 0..sy {
@@ -557,7 +557,7 @@ fn build_reintegration_p(
                 // nH = sum(nH * expnX, axis=0) / (expnX.sum(axis=0) + 1e-10)
                 let nX_ch_sum = nX_sum.sum_axis(Axis(2)); // (SX, SY)
                 let expnX = nX_ch_sum.mapv(|v| v.exp() - 1.0);
-                let mut nH_soft = Array3::<f64>::zeros((sx, sy, hidden_dims));
+                let mut nH_soft = Array3::<f32>::zeros((sx, sy, hidden_dims));
                 for k_idx in 0..hidden_dims {
                     for i in 0..sx {
                         for j in 0..sy {
@@ -588,9 +588,9 @@ fn build_reintegration_p(
 }
 
 /// Roll a 3D array along axes 0 and 1 by (dx, dy)
-fn roll_3d_axes01(arr: &Array3<f64>, dx: i32, dy: i32) -> Array3<f64> {
+fn roll_3d_axes01(arr: &Array3<f32>, dx: i32, dy: i32) -> Array3<f32> {
     let (sx, sy, k) = arr.dim();
-    let mut out = Array3::<f64>::zeros((sx, sy, k));
+    let mut out = Array3::<f32>::zeros((sx, sy, k));
     for i in 0..sx {
         for j in 0..sy {
             let ni = ((i as i32 + dx).rem_euclid(sx as i32)) as usize;
@@ -604,9 +604,9 @@ fn roll_3d_axes01(arr: &Array3<f64>, dx: i32, dy: i32) -> Array3<f64> {
 }
 
 /// Roll a 4D array along axes 0 and 1 by (dx, dy)
-fn roll_4d_axes01(arr: &Array4<f64>, dx: i32, dy: i32) -> Array4<f64> {
+fn roll_4d_axes01(arr: &Array4<f32>, dx: i32, dy: i32) -> Array4<f32> {
     let (sx, sy, a, b) = arr.dim();
-    let mut out = Array4::<f64>::zeros((sx, sy, a, b));
+    let mut out = Array4::<f32>::zeros((sx, sy, a, b));
     for i in 0..sx {
         for j in 0..sy {
             let ni = ((i as i32 + dx).rem_euclid(sx as i32)) as usize;
@@ -627,22 +627,22 @@ fn roll_4d_axes01(arr: &Array4<f64>, dx: i32, dy: i32) -> Array4<f64> {
 
 #[derive(Clone, Debug)]
 pub struct Params {
-    pub r: Array1<f64>,
-    pub b: Array2<f64>,
-    pub w: Array2<f64>,
-    pub a: Array2<f64>,
-    pub m: Array1<f64>,
-    pub s: Array1<f64>,
-    pub h: Array1<f64>,
-    pub R: f64,
+    pub r: Array1<f32>,
+    pub b: Array2<f32>,
+    pub w: Array2<f32>,
+    pub a: Array2<f32>,
+    pub m: Array1<f32>,
+    pub s: Array1<f32>,
+    pub h: Array1<f32>,
+    pub R: f32,
 }
 
 #[derive(Clone, Debug)]
 pub struct CompiledParams {
-    pub fK: Array3<Complex<f64>>,
-    pub m: Array1<f64>,
-    pub s: Array1<f64>,
-    pub h: Array1<f64>,
+    pub fK: Array3<Complex<f32>>,
+    pub m: Array1<f32>,
+    pub s: Array1<f32>,
+    pub h: Array1<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -653,17 +653,17 @@ pub struct Config {
     pub C: usize,
     pub c0: Vec<usize>,
     pub c1: Vec<Vec<usize>>,
-    pub dt: f64,
+    pub dt: f32,
     pub dd: i32,
-    pub sigma: f64,
-    pub n: f64,
-    pub theta_A: f64,
+    pub sigma: f32,
+    pub n: f32,
+    pub theta_A: f32,
     pub border: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct State {
-    pub A: Array3<f64>,
+    pub A: Array3<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -674,8 +674,8 @@ pub struct ConfigP {
 
 #[derive(Clone, Debug)]
 pub struct StateP {
-    pub A: Array3<f64>,
-    pub P: Array3<f64>,
+    pub A: Array3<f32>,
+    pub P: Array3<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -715,21 +715,21 @@ fn build_kernel_computer(
     let mid = SX as i32 / 2;
 
     move |params: &Params, planner: &mut Fft2DPlanner| -> CompiledParams {
-        let mut K = Array3::<f64>::zeros((SY, SX, nb_k));
+        let mut K = Array3::<f32>::zeros((SY, SX, nb_k));
         for k in 0..nb_k {
-            let mut dist = Array2::<f64>::zeros((SY, SX));
+            let mut dist = Array2::<f32>::zeros((SY, SX));
             for i in 0..SY {
                 for j in 0..SX {
                     let di = i as i32 - mid;
                     let dj = j as i32 - mid;
-                    let d = ((di * di + dj * dj) as f64).sqrt();
+                    let d = ((di * di + dj * dj) as f32).sqrt();
                     dist[[i, j]] = d / ((params.R + 15.0) * params.r[k]);
                 }
             }
             let sig = dist.mapv(|d| sigmoid(-(d - 1.0) * 10.0));
-            let a: Vec<f64> = params.a.row(k).to_vec();
-            let w: Vec<f64> = params.w.row(k).to_vec();
-            let b: Vec<f64> = params.b.row(k).to_vec();
+            let a: Vec<f32> = params.a.row(k).to_vec();
+            let w: Vec<f32> = params.w.row(k).to_vec();
+            let b: Vec<f32> = params.b.row(k).to_vec();
             let kf = ker_f(&dist, &a, &w, &b);
             let mut kslice = sig * kf;
             let total = kslice.sum();
@@ -786,7 +786,7 @@ fn build_step_fn(
         let fA = planner.fft2(&A_complex);
 
         // U = real(ifft2(fK * fA[:,:,c0], axes=(0,1)))
-        let mut fA_selected = Array3::<Complex<f64>>::zeros((SX, SY, nb_k));
+        let mut fA_selected = Array3::<Complex<f32>>::zeros((SX, SY, nb_k));
         for k in 0..nb_k {
             let src_ch = c0[k];
             for i in 0..SX {
@@ -796,7 +796,7 @@ fn build_step_fn(
             }
         }
 
-        let mut fK_times_fA = Array3::<Complex<f64>>::zeros((SX, SY, nb_k));
+        let mut fK_times_fA = Array3::<Complex<f32>>::zeros((SX, SY, nb_k));
         for k in 0..nb_k {
             for i in 0..SX {
                 for j in 0..SY {
@@ -820,7 +820,7 @@ fn build_step_fn(
         }
 
         // U = dstack([U[:,:,c1[c]].sum(-1) for c in range(C)])
-        let mut U_new = Array3::<f64>::zeros((SX, SY, C));
+        let mut U_new = Array3::<f32>::zeros((SX, SY, C));
         for c in 0..C {
             for &k_idx in &c1[c] {
                 for i in 0..SX {
@@ -838,7 +838,7 @@ fn build_step_fn(
 
         // alpha = clip((A[:,:,None,:] / theta_A)^n, 0, 1)
         // A has shape (SX, SY, C), we need (SX, SY, 1, C) for broadcasting with nabla (SX, SY, 2, C)
-        let mut alpha = Array4::<f64>::zeros((SX, SY, 2, C));
+        let mut alpha = Array4::<f32>::zeros((SX, SY, 2, C));
         for c_idx in 0..C {
             for i in 0..SX {
                 for j in 0..SY {
@@ -851,7 +851,7 @@ fn build_step_fn(
         }
 
         // advect(A, nabla_U * (1-alpha) - nabla_A * alpha)
-        let mut flow = Array4::<f64>::zeros((SX, SY, 2, C));
+        let mut flow = Array4::<f32>::zeros((SX, SY, 2, C));
         for c_idx in 0..C {
             for a in 0..2 {
                 for i in 0..SX {
@@ -899,7 +899,7 @@ fn build_step_fn_p(
         let A_complex = A.mapv(|v| Complex::new(v, 0.0));
         let fA = planner.fft2(&A_complex);
 
-        let mut fA_selected = Array3::<Complex<f64>>::zeros((SX, SY, nb_k));
+        let mut fA_selected = Array3::<Complex<f32>>::zeros((SX, SY, nb_k));
         for k in 0..nb_k {
             let src_ch = c0[k];
             for i in 0..SX {
@@ -909,7 +909,7 @@ fn build_step_fn_p(
             }
         }
 
-        let mut fK_times_fA = Array3::<Complex<f64>>::zeros((SX, SY, nb_k));
+        let mut fK_times_fA = Array3::<Complex<f32>>::zeros((SX, SY, nb_k));
         for k in 0..nb_k {
             for i in 0..SX {
                 for j in 0..SY {
@@ -933,7 +933,7 @@ fn build_step_fn_p(
         }
 
         // U = dstack([U[:,:,c1[c]].sum(-1) for c in range(C)])
-        let mut U_new = Array3::<f64>::zeros((SX, SY, C));
+        let mut U_new = Array3::<f32>::zeros((SX, SY, C));
         for c in 0..C {
             for &k_idx in &c1[c] {
                 for i in 0..SX {
@@ -952,7 +952,7 @@ fn build_step_fn_p(
         let C_grad = sobel(&A_sum);
 
         // alpha = clip((A / 2)^2, 0, 1)
-        let mut alpha = Array4::<f64>::zeros((SX, SY, 2, C));
+        let mut alpha = Array4::<f32>::zeros((SX, SY, 2, C));
         for c_idx in 0..C {
             for i in 0..SX {
                 for j in 0..SY {
@@ -965,8 +965,8 @@ fn build_step_fn_p(
         }
 
         // F = clip(F * (1-alpha) - C_grad * alpha, -(dd-sigma), dd-sigma)
-        let ma = dd as f64 - sigma;
-        let mut flow = Array4::<f64>::zeros((SX, SY, 2, C));
+        let ma = dd as f32 - sigma;
+        let mut flow = Array4::<f32>::zeros((SX, SY, 2, C));
         for c_idx in 0..C {
             for a in 0..2 {
                 for i in 0..SX {
@@ -1072,18 +1072,18 @@ fn main() {
     println!("  fK[0,0,0] = {:?}", compiled.fK[[0, 0, 0]]);
 
     // Initialize state with a small Gaussian blob in the center
-    let mut A = Array3::<f64>::zeros((SX, SY, C));
-    let cx = SX as f64 / 2.0;
-    let cy = SY as f64 / 2.0;
-    let variance = (SX * SX) as f64 / 64.0;
+    let mut A = Array3::<f32>::zeros((SX, SY, C));
+    let cx = SX as f32 / 2.0;
+    let cy = SY as f32 / 2.0;
+    let variance = (SX * SX) as f32 / 64.0;
     for i in 0..SX {
         for j in 0..SY {
-            let dx = i as f64 - cx;
-            let dy = j as f64 - cy;
+            let dx = i as f32 - cx;
+            let dy = j as f32 - cy;
             let dist = (dx * dx + dy * dy).sqrt();
             let val = (-dist * dist / variance).exp();
             for c in 0..C {
-                A[[i, j, c]] = val * (0.5 + 0.5 * (c as f64 / C as f64));
+                A[[i, j, c]] = val * (0.5 + 0.5 * (c as f32 / C as f32));
             }
         }
     }
@@ -1106,7 +1106,7 @@ fn main() {
         mix: "avg".to_string(),
     };
 
-    let P = Array3::<f64>::ones((SX, SY, nb_k)) * 0.5;
+    let P = Array3::<f32>::ones((SX, SY, nb_k)) * 0.5;
     let init_state_p = StateP {
         A: init_state.A.clone(),
         P,
