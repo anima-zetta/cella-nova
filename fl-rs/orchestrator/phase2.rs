@@ -11,8 +11,6 @@
 //   2c. Semi-Lagrangian advection — advect mass along flow field
 // ===========================================================================
 
-use super::COMPUTE_SHADER;
-
 // ===========================================================================
 // Phase 2a: Channel aggregation
 //
@@ -30,6 +28,7 @@ impl AggregationPhase {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        compute_shader: &str,
         shape: &[usize],
         num_kernels: usize,
         num_channels: usize,
@@ -118,7 +117,7 @@ impl AggregationPhase {
 
         let compute_sm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fl::compute"),
-            source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(compute_shader.into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("fl::ca"),
@@ -197,6 +196,7 @@ impl GradientFlowPhase {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        compute_shader: &str,
         shape: &[usize],
         num_channels: usize,
         // Shared buffers (references: owned by GpuFlowLenia or another phase)
@@ -306,7 +306,7 @@ impl GradientFlowPhase {
         };
         let compute_sm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fl::compute"),
-            source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(compute_shader.into()),
         });
         let cp =
             |label: &str, layout: &wgpu::PipelineLayout, entry: &str| -> wgpu::ComputePipeline {
@@ -505,6 +505,7 @@ impl AdvectionPhase {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        compute_shader: &str,
         shape: &[usize],
         num_channels: usize,
         num_kernels: usize,
@@ -591,7 +592,7 @@ impl AdvectionPhase {
 
         let compute_sm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fl::compute"),
-            source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(compute_shader.into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("fl::ri"),
@@ -663,6 +664,7 @@ pub struct ParamAdvectionPhase {
 impl ParamAdvectionPhase {
     pub fn new(
         device: &wgpu::Device,
+        compute_shader: &str,
         // Shared buffers
         channel_buffer: &wgpu::Buffer,
         flow_x_buffer: &wgpu::Buffer,
@@ -716,7 +718,7 @@ impl ParamAdvectionPhase {
 
         let compute_sm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fl::compute"),
-            source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(compute_shader.into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("fl::ri_param"),

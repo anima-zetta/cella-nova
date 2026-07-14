@@ -22,7 +22,19 @@ use std::sync::Arc;
 // WGSL shaders
 // ---------------------------------------------------------------------------
 
-const COMPUTE_SHADER: &str = include_str!("../shaders/compute.wgsl");
+/// Select the compute shader source based on grid size.
+fn select_compute_shader(grid_size: usize) -> &'static str {
+    match grid_size {
+        64 => include_str!("../shaders/compute_64.wgsl"),
+        128 => include_str!("../shaders/compute_128.wgsl"),
+        256 => include_str!("../shaders/compute_256.wgsl"),
+        512 => include_str!("../shaders/compute_512.wgsl"),
+        _ => panic!(
+            "Unsupported grid size: {}. Supported sizes: 64, 128, 256, 512",
+            grid_size
+        ),
+    }
+}
 
 /// Stride between per-kernel growth param slots in the GPU buffer.
 /// Must be at least `min_storage_buffer_offset_alignment` (256 on most devices).
@@ -36,19 +48,11 @@ pub struct GpuFlowLenia {
     context: Arc<WgpuContext>,
     shape: Vec<usize>,
     total_elements: usize,
-    dt: f32,
     num_channels: usize,
     num_kernels: usize,
-    dd: i32,
-    sigma: f32,
 
     // Channel mapping
     c0: Vec<u32>,
-
-    // Per-kernel growth params
-    kernel_m: Vec<f32>,
-    kernel_s: Vec<f32>,
-    kernel_h: Vec<f32>,
 
     // --- Packed GPU buffers (shared across phases) ---
     /// All channels packed: [X*Y*C] f32
@@ -61,9 +65,6 @@ pub struct GpuFlowLenia {
     param_buffer: wgpu::Buffer,
     /// Output of parameter advection: [X*Y*K] f32
     new_param_buffer: wgpu::Buffer,
-
-    // Readback
-    readback_buffer: wgpu::Buffer,
 
     // --- Phase sub-structs ---
     convolution: ConvolutionPhase,
@@ -143,17 +144,12 @@ impl GpuFlowLenia {
         let ones: Vec<f32> = vec![1.0f32; total_elements * num_kernels];
         queue.write_buffer(&param_buffer, 0, bytemuck::cast_slice(&ones));
 
-        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("fl::readback"),
-            size: buf_size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         // --- Initialize phase sub-structs ---
+        let compute_shader = select_compute_shader(shape[0]);
         let convolution = ConvolutionPhase::new(
             device,
             queue,
+            compute_shader,
             shape,
             total_elements,
             num_kernels,
@@ -170,6 +166,7 @@ impl GpuFlowLenia {
         let aggregation = AggregationPhase::new(
             device,
             queue,
+            compute_shader,
             shape,
             num_kernels,
             num_channels,
@@ -181,6 +178,7 @@ impl GpuFlowLenia {
         let gradient_flow = GradientFlowPhase::new(
             device,
             queue,
+            compute_shader,
             shape,
             num_channels,
             &channel_buffer,
@@ -197,6 +195,7 @@ impl GpuFlowLenia {
         let advection = AdvectionPhase::new(
             device,
             queue,
+            compute_shader,
             shape,
             num_channels,
             num_kernels,
@@ -213,6 +212,7 @@ impl GpuFlowLenia {
 
         let param_advection = ParamAdvectionPhase::new(
             device,
+            compute_shader,
             &channel_buffer,
             &flow_x_buffer,
             &flow_y_buffer,
@@ -225,21 +225,14 @@ impl GpuFlowLenia {
             context,
             shape: shape.to_vec(),
             total_elements,
-            dt,
             num_channels,
             num_kernels,
-            dd,
-            sigma,
             c0: c0.to_vec(),
-            kernel_m: kernel_m.to_vec(),
-            kernel_s: kernel_s.to_vec(),
-            kernel_h: kernel_h.to_vec(),
             channel_buffer,
             new_channel_buffer,
             kernel_buffer,
             param_buffer,
             new_param_buffer,
-            readback_buffer,
             convolution,
             aggregation,
             gradient_flow,
@@ -250,39 +243,11 @@ impl GpuFlowLenia {
 
     // --- Accessors ---
 
-    pub fn shape(&self) -> &[usize] {
-        &self.shape
-    }
-
     pub fn channel_buffer(&self) -> &wgpu::Buffer {
         &self.channel_buffer
     }
 
-    pub fn num_channels(&self) -> usize {
-        self.num_channels
-    }
-
-    pub fn num_kernels(&self) -> usize {
-        self.num_kernels
-    }
-
-    pub fn set_dt(&mut self, dt: f32) {
-        self.dt = dt;
-        let ma = self.dd as f32 - self.sigma;
-        let mut data = Vec::with_capacity(32);
-        data.extend_from_slice(&(self.shape[0] as u32).to_le_bytes());
-        data.extend_from_slice(&(self.shape[1] as u32).to_le_bytes());
-        data.extend_from_slice(&(self.dd as i32).to_le_bytes());
-        data.extend_from_slice(&self.sigma.to_le_bytes());
-        data.extend_from_slice(&dt.to_le_bytes());
-        data.extend_from_slice(&(self.num_channels as u32).to_le_bytes());
-        data.extend_from_slice(&(self.num_kernels as u32).to_le_bytes());
-        data.extend_from_slice(&ma.to_le_bytes());
-        self.context
-            .queue
-            .write_buffer(&self.advection.params_buffer, 0, &data);
-    }
-
+    /// Run N iterations (forward pass).
     /// Uploads a pre-FFT'd kernel at the given index.
     pub fn set_kernel(&self, kernel_fft: &[num_complex::Complex32], kernel_idx: usize) {
         assert_eq!(kernel_fft.len(), self.total_elements);
@@ -305,34 +270,7 @@ impl GpuFlowLenia {
         );
     }
 
-    /// Update growth parameters for a single kernel.
-    pub fn set_growth_param(&mut self, k: usize, m: f32, s: f32, h: f32) {
-        self.kernel_m[k] = m;
-        self.kernel_s[k] = s;
-        self.kernel_h[k] = h;
-        let gp: [f32; 3] = [m, s, h];
-        self.context.queue.write_buffer(
-            self.convolution.growth_params_buffer(),
-            (k as u64) * GP_STRIDE,
-            bytemuck::cast_slice(&gp),
-        );
-    }
-
-    /// Update all growth parameters at once.
-    pub fn set_all_growth_params(&mut self, m: &[f32], s: &[f32], h: &[f32]) {
-        self.kernel_m.copy_from_slice(m);
-        self.kernel_s.copy_from_slice(s);
-        self.kernel_h.copy_from_slice(h);
-        for k in 0..self.kernel_m.len() {
-            let gp: [f32; 3] = [m[k], s[k], h[k]];
-            self.context.queue.write_buffer(
-                self.convolution.growth_params_buffer(),
-                (k as u64) * GP_STRIDE,
-                bytemuck::cast_slice(&gp),
-            );
-        }
-    }
-
+    #[allow(dead_code)]
     /// Run N iterations (forward pass).
     pub fn run_steps(&self, n: usize) {
         for _ in 0..n {
@@ -340,6 +278,7 @@ impl GpuFlowLenia {
         }
     }
 
+    #[allow(dead_code)]
     /// Download all channel data concatenated.
     pub fn download_all_channels(&self) -> Vec<f32> {
         let device = &self.context.device;
@@ -370,91 +309,7 @@ impl GpuFlowLenia {
         result
     }
 
-    /// Download kernel FFT weights for a given kernel.
-    pub fn download_kernel(&self, k: usize) -> Vec<num_complex::Complex32> {
-        let device = &self.context.device;
-        let queue = &self.context.queue;
-        let total = self.total_elements;
-        let total_bytes = (total * 8) as u64;
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("fl::readback_k"),
-            size: total_bytes,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("fl::download_k"),
-        });
-        let offset = (k * total * 8) as u64;
-        encoder.copy_buffer_to_buffer(&self.kernel_buffer, offset, &readback, 0, total_bytes);
-        queue.submit(Some(encoder.finish()));
-        let slice = readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::Maintain::Wait);
-        let view = slice.get_mapped_range();
-        let raw: Vec<f32> = bytemuck::cast_slice(&view).to_vec();
-        drop(view);
-        readback.unmap();
-        raw.chunks(2)
-            .map(|c| num_complex::Complex32::new(c[0], c[1]))
-            .collect()
-    }
-
-    /// Re-initialize all channels from flat f64 data.
-    pub fn reinit_channels(&self, data: &[Vec<f64>]) {
-        for (c, ch_data) in data.iter().enumerate() {
-            self.upload_channel(ch_data, c);
-        }
-    }
-
-    /// Get total elements (width * height).
-    pub fn total_elements(&self) -> usize {
-        self.total_elements
-    }
-
-    /// Get kernel_m slice.
-    pub fn kernel_m_slice(&self) -> &[f32] {
-        &self.kernel_m
-    }
-
-    /// Get kernel_s slice.
-    pub fn kernel_s_slice(&self) -> &[f32] {
-        &self.kernel_s
-    }
-
-    /// Get kernel_h slice.
-    pub fn kernel_h_slice(&self) -> &[f32] {
-        &self.kernel_h
-    }
-
-    pub fn download_channel(&self, channel: usize) -> Vec<f32> {
-        let device = &self.context.device;
-        let queue = &self.context.queue;
-        let buf_size = (self.total_elements * 4) as u64;
-        let offset = (channel * self.total_elements * 4) as u64;
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("fl::download"),
-        });
-        encoder.copy_buffer_to_buffer(
-            &self.channel_buffer,
-            offset,
-            &self.readback_buffer,
-            0,
-            buf_size,
-        );
-        queue.submit(Some(encoder.finish()));
-
-        let slice = self.readback_buffer.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::Maintain::Wait);
-        let view = slice.get_mapped_range();
-        let result: Vec<f32> = bytemuck::cast_slice(&view).to_vec();
-        drop(view);
-        self.readback_buffer.unmap();
-        result
-    }
-
+    /// Download all channel data concatenated.
     // =======================================================================
     // Main iteration
     // =======================================================================

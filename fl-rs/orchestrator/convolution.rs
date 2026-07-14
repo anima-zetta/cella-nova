@@ -14,7 +14,6 @@
 //        e. normalize_growth (scale + apply G(x))
 // ===========================================================================
 
-use super::COMPUTE_SHADER;
 use super::GP_STRIDE;
 
 pub struct ConvolutionPhase {
@@ -43,14 +42,13 @@ pub struct ConvolutionPhase {
     // Per-kernel normalize+growth bind groups
     normalize_growth_bgs: Vec<wgpu::BindGroup>,
 
-    // Parameter buffers
-    growth_params_buffer: wgpu::Buffer,
 }
 
 impl ConvolutionPhase {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        compute_shader: &str,
         shape: &[usize],
         total_elements: usize,
         num_kernels: usize,
@@ -198,7 +196,7 @@ impl ConvolutionPhase {
         };
         let compute_sm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fl::compute"),
-            source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(compute_shader.into()),
         });
         let cp =
             |label: &str, layout: &wgpu::PipelineLayout, entry: &str| -> wgpu::ComputePipeline {
@@ -347,7 +345,6 @@ impl ConvolutionPhase {
             normalize_growth_bgs,
             conv_buffer,
             conv_saved_buffer,
-            growth_params_buffer,
         }
     }
 
@@ -502,9 +499,6 @@ impl ConvolutionPhase {
         }
     }
 
-    pub fn growth_params_buffer(&self) -> &wgpu::Buffer {
-        &self.growth_params_buffer
-    }
 
     /// Helper: begin a compute pass, set pipeline + bind group, dispatch.
     fn dispatch(
