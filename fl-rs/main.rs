@@ -363,6 +363,7 @@ fn main() {
 
     let mut last_fps_time = Instant::now();
     let mut frame_count: u32 = 0;
+    let mut last_compute_ms: f64 = 0.0;
 
     println!("Flow Lenia: GPU-Accelerated Mass-Conserving CA");
     println!(
@@ -387,7 +388,6 @@ fn main() {
             } => *control_flow = ControlFlow::Exit,
 
             Event::MainEventsCleared => {
-                game.iterate();
                 window.request_redraw();
             }
 
@@ -398,25 +398,33 @@ fn main() {
                 if elapsed >= 1.0 {
                     let fps = frame_count as f64 / elapsed;
                     window.set_title(&format!(
-                        "Flow Lenia GPU -- {:.0} FPS ({}x{} grid, {}ch, {}kernels, {} creatures)",
-                        fps, GRID_SIZE, GRID_SIZE, num_channels, num_kernels, num_creatures
+                        "Flow Lenia GPU -- {:.0} FPS | compute {:.1}ms ({}x{} grid, {}ch, {}kernels, {} creatures)",
+                        fps, last_compute_ms, GRID_SIZE, GRID_SIZE, num_channels, num_kernels, num_creatures
                     ));
                     last_fps_time = now;
                     frame_count = 0;
                 }
 
+                // Get the surface texture first (may wait for vsync)
                 let frame = surface.get_current_texture().unwrap();
                 let view = frame
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
 
+                // Single encoder: compute + render in one submit
                 let mut encoder =
                     context
                         .device
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("render encoder"),
+                            label: Some("frame encoder"),
                         });
 
+                // Compute pass
+                let compute_start = Instant::now();
+                game.iterate_with_encoder(&mut encoder);
+                last_compute_ms = compute_start.elapsed().as_secs_f64() * 1000.0;
+
+                // Render pass
                 {
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("render pass"),

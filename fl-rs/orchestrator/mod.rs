@@ -374,6 +374,46 @@ impl GpuFlowLenia {
         queue.submit(Some(encoder.finish()));
     }
 
+    /// Performs a single iteration using an existing command encoder.
+    /// Used by the interactive renderer to combine compute + render in one submit.
+    pub fn iterate_with_encoder(&self, encoder: &mut wgpu::CommandEncoder) {
+        let device = &self.context.device;
+        let total = self.total_elements as u32;
+        let wg = (total + 255) / 256;
+        let wg_c = ((total * self.num_channels as u32) + 255) / 256;
+
+        // Phase 1: Per-kernel convolution + growth
+        self.convolution.run(
+            device,
+            encoder,
+            &self.channel_buffer,
+            &self.kernel_buffer,
+            &self.c0,
+            self.num_kernels,
+            self.num_channels,
+            self.total_elements,
+            &self.shape,
+        );
+
+        // Phase 2a: Channel aggregation
+        self.aggregation.run(encoder, wg_c);
+
+        // Phase 2b: Sobel gradients + flow field
+        self.gradient_flow.run(encoder, wg, wg_c);
+
+        // Phase 2c: Semi-Lagrangian advection
+        self.advection.run(encoder, wg_c);
+
+        // Phase 3: Swap new -> current for density
+        encoder.copy_buffer_to_buffer(
+            &self.new_channel_buffer,
+            0,
+            &self.channel_buffer,
+            0,
+            (self.total_elements * self.num_channels * 4) as u64,
+        );
+    }
+
     /// Performs a single iteration with per-phase GPU timing.
     /// Each phase uses a separate submit + device.poll() to measure time.
     /// This adds overhead but gives a rough breakdown.

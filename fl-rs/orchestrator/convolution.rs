@@ -28,6 +28,9 @@ pub struct ConvolutionPhase {
     /// Saved frequency-domain data for sharing forward FFTs across kernels.
     conv_saved_buffer: wgpu::Buffer,
 
+    // Bit-reversal LUT for FFT
+    bitrev_buffer: wgpu::Buffer,
+
     // copy_to_conv
     copy_to_conv_pipeline: wgpu::ComputePipeline,
     copy_to_conv_bgl: wgpu::BindGroupLayout,
@@ -35,6 +38,14 @@ pub struct ConvolutionPhase {
     // complex_mul
     complex_mul_pipeline: wgpu::ComputePipeline,
     complex_mul_bgl: wgpu::BindGroupLayout,
+
+    // Fused cmul + IFFT col
+    fused_cmul_ifft_pipeline: wgpu::ComputePipeline,
+    fused_cmul_ifft_bgl: wgpu::BindGroupLayout,
+
+    // cmul_from_saved: read saved_freq * kernel -> write conv
+    cmul_from_saved_pipeline: wgpu::ComputePipeline,
+    cmul_from_saved_bgl: wgpu::BindGroupLayout,
 
     // normalize_growth
     normalize_growth_pipeline: wgpu::ComputePipeline,
@@ -45,6 +56,8 @@ pub struct ConvolutionPhase {
     // Cached per-kernel bind groups (created once in new(), reused in run())
     copy_bgs_cache: Vec<Vec<wgpu::BindGroup>>,
     cmul_bgs_cache: Vec<Vec<wgpu::BindGroup>>,
+    fused_cmul_ifft_bgs_cache: Vec<Vec<wgpu::BindGroup>>,
+    cmul_from_saved_bgs_cache: Vec<Vec<wgpu::BindGroup>>,
 
     // Cached channel-to-kernel mapping
     ch_to_kernels_cache: Vec<Vec<usize>>,
@@ -93,6 +106,24 @@ impl ConvolutionPhase {
             mapped_at_creation: false,
         });
         queue.write_buffer(&twiddle_buffer, 0, bytemuck::cast_slice(&twiddles));
+
+        // Bit-reversal LUT: size = n, bits = log2(n)
+        let bits = (n as f64).log2() as u32;
+        let mut bitrev: Vec<u32> = Vec::with_capacity(n);
+        for i in 0..n as u32 {
+            let mut rev = 0u32;
+            for b in 0..bits {
+                rev |= ((i >> b) & 1) << (bits - 1 - b);
+            }
+            bitrev.push(rev);
+        }
+        let bitrev_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fl::bitrev_lut"),
+            size: (bitrev.len() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&bitrev_buffer, 0, bytemuck::cast_slice(&bitrev));
 
         // --- Uniform buffers ---
         let make_uniform = |label: &str, size: u64| -> wgpu::Buffer {
@@ -192,8 +223,18 @@ impl ConvolutionPhase {
             });
         let fft_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::fft bgl"),
-            entries: &[srw(0), sro(2), unif(3)],
+            entries: &[srw(0), sro(2), unif(3), sro(41)],
         });
+        let fused_cmul_ifft_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("fl::fused_cmul_ifft bgl"),
+                entries: &[srw(0), sro(2), unif(3), sro(7), sro(41)],
+            });
+        let cmul_from_saved_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("fl::cmul_from_saved bgl"),
+                entries: &[srw(5), sro(7), sro(44)],
+            });
 
         // --- Pipeline layouts & pipelines ---
         let pl = |label: &str, bgl: &wgpu::BindGroupLayout| -> wgpu::PipelineLayout {
@@ -242,6 +283,16 @@ impl ConvolutionPhase {
             &pl("fl::fft_col pl", &fft_bgl),
             "fft_col_main",
         );
+        let fused_cmul_ifft_pipeline = cp(
+            "fl::fused_cmul_ifft",
+            &pl("fl::fused_cmul_ifft pl", &fused_cmul_ifft_bgl),
+            "fused_cmul_ifft_col_main",
+        );
+        let cmul_from_saved_pipeline = cp(
+            "fl::cmul_from_saved",
+            &pl("fl::cmul_from_saved pl", &cmul_from_saved_bgl),
+            "cmul_from_saved_main",
+        );
 
         // --- Cached bind groups ---
         let fft_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -259,6 +310,10 @@ impl ConvolutionPhase {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: fft_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 41,
+                    resource: bitrev_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -282,6 +337,10 @@ impl ConvolutionPhase {
                         offset: 0,
                         size: std::num::NonZeroU64::new(8),
                     }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 41,
+                    resource: bitrev_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -342,14 +401,20 @@ impl ConvolutionPhase {
 
         let mut copy_bgs_cache: Vec<Vec<wgpu::BindGroup>> = Vec::new();
         let mut cmul_bgs_cache: Vec<Vec<wgpu::BindGroup>> = Vec::new();
+        let mut fused_cmul_ifft_bgs_cache: Vec<Vec<wgpu::BindGroup>> = Vec::new();
+        let mut cmul_from_saved_bgs_cache: Vec<Vec<wgpu::BindGroup>> = Vec::new();
         for kernels in &ch_to_kernels_cache {
             if kernels.is_empty() {
                 copy_bgs_cache.push(Vec::new());
                 cmul_bgs_cache.push(Vec::new());
+                fused_cmul_ifft_bgs_cache.push(Vec::new());
+                cmul_from_saved_bgs_cache.push(Vec::new());
                 continue;
             }
             let mut copy_bgs = Vec::with_capacity(kernels.len());
             let mut cmul_bgs = Vec::with_capacity(kernels.len());
+            let mut fused_bgs = Vec::with_capacity(kernels.len());
+            let mut saved_bgs = Vec::with_capacity(kernels.len());
             for &k in kernels {
                 let src_c = c0[k] as usize;
                 let ch_offset = (src_c * total_elements * 4) as u64;
@@ -394,9 +459,65 @@ impl ConvolutionPhase {
                         },
                     ],
                 }));
+
+                fused_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("fl::fused_cmul_ifft_bg k={k}")),
+                    layout: &fused_cmul_ifft_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: conv_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: twiddle_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: inv_fft_params_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: kernel_buffer,
+                                offset: k_offset,
+                                size: k_size,
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 41,
+                            resource: bitrev_buffer.as_entire_binding(),
+                        },
+                    ],
+                }));
+
+                saved_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("fl::cmul_from_saved_bg k={k}")),
+                    layout: &cmul_from_saved_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: conv_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: kernel_buffer,
+                                offset: k_offset,
+                                size: k_size,
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 44,
+                            resource: conv_saved_buffer.as_entire_binding(),
+                        },
+                    ],
+                }));
             }
             copy_bgs_cache.push(copy_bgs);
             cmul_bgs_cache.push(cmul_bgs);
+            fused_cmul_ifft_bgs_cache.push(fused_bgs);
+            cmul_from_saved_bgs_cache.push(saved_bgs);
         }
 
         Self {
@@ -408,12 +529,19 @@ impl ConvolutionPhase {
             copy_to_conv_bgl,
             complex_mul_pipeline,
             complex_mul_bgl,
+            fused_cmul_ifft_pipeline,
+            fused_cmul_ifft_bgl,
+            cmul_from_saved_pipeline,
+            cmul_from_saved_bgl,
             normalize_growth_pipeline,
             normalize_growth_bgs,
+            bitrev_buffer,
             conv_buffer,
             conv_saved_buffer,
             copy_bgs_cache,
             cmul_bgs_cache,
+            fused_cmul_ifft_bgs_cache,
+            cmul_from_saved_bgs_cache,
             ch_to_kernels_cache,
         }
     }
@@ -443,6 +571,8 @@ impl ConvolutionPhase {
 
             let copy_bgs = &self.copy_bgs_cache[gi];
             let cmul_bgs = &self.cmul_bgs_cache[gi];
+            let fused_bgs = &self.fused_cmul_ifft_bgs_cache[gi];
+            let saved_bgs = &self.cmul_from_saved_bgs_cache[gi];
 
             // Step 1: Copy channel → conv (first kernel's source channel)
             self.dispatch(
@@ -458,37 +588,41 @@ impl ConvolutionPhase {
             self.dispatch(encoder, "fft_col", &self.fft_col_pipeline, &self.fft_bg, sz);
 
             // Step 3: Save frequency-domain data for reuse across kernels
-            encoder.copy_buffer_to_buffer(
-                &self.conv_buffer,
-                0,
-                &self.conv_saved_buffer,
-                0,
-                conv_buf_size,
-            );
+            // (skip when only 1 kernel shares this channel -- no reuse needed)
+            if kernels.len() > 1 {
+                encoder.copy_buffer_to_buffer(
+                    &self.conv_buffer,
+                    0,
+                    &self.conv_saved_buffer,
+                    0,
+                    conv_buf_size,
+                );
+            }
 
             // Step 4: For each kernel sharing this channel...
             for (i, k) in kernels.iter().enumerate() {
-                // Step 4a: Restore frequency-domain data (skip for first kernel)
-                if i > 0 {
-                    encoder.copy_buffer_to_buffer(
-                        &self.conv_saved_buffer,
-                        0,
-                        &self.conv_buffer,
-                        0,
-                        conv_buf_size,
+                if i == 0 {
+                    // First kernel: cmul in-place on conv_buffer (freq data already there)
+                    self.dispatch(
+                        encoder,
+                        "cmul",
+                        &self.complex_mul_pipeline,
+                        &cmul_bgs[i],
+                        wg,
+                    );
+                } else {
+                    // Subsequent kernels: read saved freq * kernel, write to conv_buffer
+                    // (eliminates the restore buffer copy)
+                    self.dispatch(
+                        encoder,
+                        "cmul_from_saved",
+                        &self.cmul_from_saved_pipeline,
+                        &saved_bgs[i],
+                        wg,
                     );
                 }
 
-                // Step 4b: Complex multiply (channel × kernel in frequency domain)
-                self.dispatch(
-                    encoder,
-                    "cmul",
-                    &self.complex_mul_pipeline,
-                    &cmul_bgs[i],
-                    wg,
-                );
-
-                // Step 4c: Inverse FFT — column pass then row pass
+                // Step 4c: Inverse FFT -- column pass then row pass
                 self.dispatch(
                     encoder,
                     "inv_fft_col",

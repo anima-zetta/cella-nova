@@ -16,6 +16,10 @@
 struct FftParams { width: u32, inverse: u32 }
 @group(0) @binding(3) var<uniform> fft_params: FftParams;
 
+// Precomputed 9-bit reversal permutation (0..511), uploaded once by the host.
+// Replaces the per-invocation bit_reverse() loop with a single cached buffer read.
+@group(0) @binding(41) var<storage, read> bitrev_lut: array<u32>;
+
 var<workgroup> ping: array<vec2<f32>, 512>;
 var<workgroup> pong: array<vec2<f32>, 512>;
 
@@ -42,14 +46,6 @@ fn stockham_butterfly(stage: u32, t: u32, src: ptr<workgroup, array<vec2<f32>, 5
     (*dst)[src1] = even - odd;
 }
 
-fn bit_reverse(x: u32, bits: u32) -> u32 {
-    var result: u32 = 0u;
-    for (var i: u32 = 0u; i < bits; i = i + 1u) {
-        result = (result << 1u) | ((x >> i) & 1u);
-    }
-    return result;
-}
-
 @compute @workgroup_size(128)
 fn fft_row_main(
     @builtin(local_invocation_id) local_id: vec3<u32>,
@@ -59,10 +55,10 @@ fn fft_row_main(
     let base = row * fft_params.width;
     let t = local_id.x;
 
-    let rev_t   = bit_reverse(t,         9u);
-    let rev_t2  = bit_reverse(t + 128u,  9u);
-    let rev_t3  = bit_reverse(t + 256u,  9u);
-    let rev_t4  = bit_reverse(t + 384u,  9u);
+    let rev_t   = bitrev_lut[t];
+    let rev_t2  = bitrev_lut[t + 128u];
+    let rev_t3  = bitrev_lut[t + 256u];
+    let rev_t4  = bitrev_lut[t + 384u];
     ping[rev_t]  = fft_data[base + t];
     ping[rev_t2] = fft_data[base + t + 128u];
     ping[rev_t3] = fft_data[base + t + 256u];
@@ -111,10 +107,73 @@ fn fft_col_main(
     let w = fft_params.width;
     let t = local_id.x;
 
-    let rev_t   = bit_reverse(t,         9u);
-    let rev_t2  = bit_reverse(t + 128u,  9u);
-    let rev_t3  = bit_reverse(t + 256u,  9u);
-    let rev_t4  = bit_reverse(t + 384u,  9u);
+    let rev_t   = bitrev_lut[t];
+    let rev_t2  = bitrev_lut[t + 128u];
+    let rev_t3  = bitrev_lut[t + 256u];
+    let rev_t4  = bitrev_lut[t + 384u];
+    ping[rev_t]  = fft_data[t * w + col];
+    ping[rev_t2] = fft_data[(t + 128u) * w + col];
+    ping[rev_t3] = fft_data[(t + 256u) * w + col];
+    ping[rev_t4] = fft_data[(t + 384u) * w + col];
+    workgroupBarrier();
+
+    stockham_butterfly(0u, t + 0u, &ping, &pong);
+    stockham_butterfly(0u, t + 128u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(1u, t + 0u, &pong, &ping);
+    stockham_butterfly(1u, t + 128u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(2u, t + 0u, &ping, &pong);
+    stockham_butterfly(2u, t + 128u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(3u, t + 0u, &pong, &ping);
+    stockham_butterfly(3u, t + 128u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(4u, t + 0u, &ping, &pong);
+    stockham_butterfly(4u, t + 128u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(5u, t + 0u, &pong, &ping);
+    stockham_butterfly(5u, t + 128u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(6u, t + 0u, &ping, &pong);
+    stockham_butterfly(6u, t + 128u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(7u, t + 0u, &pong, &ping);
+    stockham_butterfly(7u, t + 128u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(8u, t + 0u, &ping, &pong);
+    stockham_butterfly(8u, t + 128u, &ping, &pong);
+
+    fft_data[t * w + col]            = pong[t];
+    fft_data[(t + 128u) * w + col]   = pong[t + 128u];
+    fft_data[(t + 256u) * w + col]   = pong[t + 256u];
+    fft_data[(t + 384u) * w + col]   = pong[t + 384u];
+}
+
+// Fused complex multiply + IFFT column pass.
+// Saves 1 dispatch per kernel by combining cmul and IFFT col.
+// Uses bindings 0 (data), 2 (twiddles), 3 (params), 7 (kernel), 41 (bitrev).
+@compute @workgroup_size(128)
+fn fused_cmul_ifft_col_main(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) wg_id: vec3<u32>
+) {
+    let col = wg_id.x;
+    let w = fft_params.width;
+    let t = local_id.x;
+
+    // Step 1: Complex multiply for elements in this column
+    fft_data[t * w + col] = complex_mul(fft_data[t * w + col], cm_kernel[t * w + col]);
+    fft_data[(t + 128u) * w + col] = complex_mul(fft_data[(t + 128u) * w + col], cm_kernel[(t + 128u) * w + col]);
+    fft_data[(t + 256u) * w + col] = complex_mul(fft_data[(t + 256u) * w + col], cm_kernel[(t + 256u) * w + col]);
+    fft_data[(t + 384u) * w + col] = complex_mul(fft_data[(t + 384u) * w + col], cm_kernel[(t + 384u) * w + col]);
+    workgroupBarrier();
+
+    // Step 2: IFFT column pass (same as fft_col_main with inverse=1)
+    let rev_t   = bitrev_lut[t];
+    let rev_t2  = bitrev_lut[t + 128u];
+    let rev_t3  = bitrev_lut[t + 256u];
+    let rev_t4  = bitrev_lut[t + 384u];
     ping[rev_t]  = fft_data[t * w + col];
     ping[rev_t2] = fft_data[(t + 128u) * w + col];
     ping[rev_t3] = fft_data[(t + 256u) * w + col];
@@ -178,6 +237,22 @@ fn complex_mul_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let i: u32 = id.x;
     if (i >= arrayLength(&cm_conv)) { return; }
     cm_conv[i] = complex_mul(cm_conv[i], cm_kernel[i]);
+}
+
+// ---------------------------------------------------------------------------
+// cmul_from_saved: element-wise conv = saved_conv * kernel  (bindings 5, 7)
+// Reads from saved frequency data (binding 5), writes to conv (binding 6).
+// Eliminates the restore buffer copy by combining restore + cmul into one pass.
+// ---------------------------------------------------------------------------
+@group(0) @binding(5) var<storage, read_write> cms_conv: array<vec2<f32>>;
+@group(0) @binding(7) var<storage, read> cms_kernel: array<vec2<f32>>;
+@group(0) @binding(44) var<storage, read> cms_saved: array<vec2<f32>>;
+
+@compute @workgroup_size(256)
+fn cmul_from_saved_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i: u32 = id.x;
+    if (i >= arrayLength(&cms_conv)) { return; }
+    cms_conv[i] = complex_mul(cms_saved[i], cms_kernel[i]);
 }
 
 // ---------------------------------------------------------------------------
