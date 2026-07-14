@@ -88,10 +88,11 @@ def generate_seed_channels(
             gy = coords[iy]
             idx = iy * size + ix
             for c, ch in enumerate(channel_configs):
-                dx = gx - ch["offset_x"]
-                dy = gy - ch["offset_y"]
-                val = math.exp(-(dx * dx + dy * dy) / (2.0 * ch["sigma"] * ch["sigma"]))
-                channels[c][idx] = max(0.0, min(1.0, val))
+                dx = gx - ch.get("offset_x", 0.0)
+                dy = gy - ch.get("offset_y", 0.0)
+                val = math.exp(-(dx*dx + dy*dy) / (2.0 * ch["sigma"] * ch["sigma"]))
+                amp = ch.get("amplitude", 1.0)
+                channels[c][idx] = max(0.0, min(1.0, val * amp))
     return channels
 
 
@@ -214,6 +215,38 @@ def main() -> None:
     }
 
     generate_creature("glider", glider)
+
+    # A simple 3-kernel creature matching the test parameters from save_frames_png.py
+    test = {
+        "num_kernels": 3,
+        "global_r": 10.0,
+        "radii": [0.5, 0.8, 0.65],
+        "growth_m": [0.1, 0.15, 0.12],
+        "growth_s": [0.05, 0.08, 0.065],
+        "growth_h": [0.5, 0.8, 0.65],
+        "a": [
+            [0.0, 0.5, 0.0],
+            [0.0, 0.4, 0.0],
+            [0.0, 0.45, 0.0],
+        ],
+        "w": [
+            [0.1, 0.05, 0.01],
+            [0.08, 0.06, 0.01],
+            [0.09, 0.055, 0.01],
+        ],
+        "b": [
+            [0.5, 0.3, 0.0],
+            [0.7, 0.2, 0.0],
+            [0.6, 0.25, 0.0],
+        ],
+        "seed_params": [
+            {"sigma": 0.25, "offset_x": 0.0, "offset_y": 0.0, "amplitude": 0.5},
+            {"sigma": 0.25, "offset_x": 0.0, "offset_y": 0.0, "amplitude": 0.6667},
+            {"sigma": 0.25, "offset_x": 0.0, "offset_y": 0.0, "amplitude": 0.8333},
+        ],
+    }
+
+    generate_creature("test", test)
 
 
 if __name__ == "__main__":

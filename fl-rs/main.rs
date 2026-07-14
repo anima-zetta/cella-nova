@@ -62,7 +62,10 @@ fn load_kernels_fft(
 // Seed loading (grid-size independent: stored at seed_size, padded to grid)
 // ---------------------------------------------------------------------------
 
-fn load_seed(creature: &str, grid_size: usize) -> (Vec<Vec<f64>>, Vec<f32>, Vec<f32>, Vec<f32>) {
+fn load_seed(
+    creature: &str,
+    grid_size: usize,
+) -> (Vec<Vec<f64>>, Vec<f32>, Vec<f32>, Vec<f32>, usize, usize) {
     #[derive(Deserialize)]
     struct GrowthParams {
         m: Vec<f32>,
@@ -71,9 +74,16 @@ fn load_seed(creature: &str, grid_size: usize) -> (Vec<Vec<f64>>, Vec<f32>, Vec<
     }
 
     #[derive(Deserialize)]
+    struct BumpParams {
+        num_kernels: usize,
+    }
+
+    #[derive(Deserialize)]
     struct CreatureConfig {
         seed_size: usize,
+        num_channels: usize,
         seed_channels: Vec<Vec<f64>>,
+        bump_params: BumpParams,
         growth_params: GrowthParams,
     }
 
@@ -99,7 +109,14 @@ fn load_seed(creature: &str, grid_size: usize) -> (Vec<Vec<f64>>, Vec<f32>, Vec<
     }
 
     let gp = config.growth_params;
-    (padded, gp.m, gp.s, gp.h)
+    (
+        padded,
+        gp.m,
+        gp.s,
+        gp.h,
+        config.num_channels,
+        config.bump_params.num_kernels,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -243,11 +260,6 @@ fn main() {
 
     // --- Flow Lenia setup ---
     let shape = GRID_SIZE.next_power_of_two();
-    let num_channels: usize = 3;
-    let num_kernels: usize = 9;
-
-    let c0: Vec<u32> = vec![0, 0, 0, 1, 1, 1, 2, 2, 2];
-    let c1: Vec<Vec<u32>> = vec![vec![0, 1, 6], vec![2, 3, 4], vec![5, 7, 8]];
 
     let dt: f32 = 0.2;
     let dd: i32 = 5;
@@ -256,8 +268,21 @@ fn main() {
     let creature = creature_name();
     println!("Creature: {}", creature);
 
-    // Load seed + growth params (grid-size independent, padded to GRID_SIZE)
-    let (seed_channels, kernel_m, kernel_s, kernel_h) = load_seed(&creature, GRID_SIZE);
+    // Load seed + growth params + dimensions from creature file
+    let (seed_channels, kernel_m, kernel_s, kernel_h, num_channels, num_kernels) =
+        load_seed(&creature, GRID_SIZE);
+
+    // Build C0/C1 mapping: simple 1:1 (kernel k reads from channel k, output goes to channel k)
+    let c0: Vec<u32> = (0..num_kernels as u32)
+        .map(|k| k % num_channels as u32)
+        .collect();
+    let c1: Vec<Vec<u32>> = (0..num_channels)
+        .map(|c| {
+            (0..num_kernels as u32)
+                .filter(|&k| k % num_channels as u32 == c as u32)
+                .collect()
+        })
+        .collect();
 
     let game = GpuFlowLenia::new(
         Arc::clone(&context),
