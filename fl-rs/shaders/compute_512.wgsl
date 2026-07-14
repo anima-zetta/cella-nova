@@ -93,32 +93,103 @@ fn fft_row_main(
     ping[rev_t16] = fft_data[base + t + 480u];
     workgroupBarrier();
 
-    stockham_butterfly(0u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(1u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(2u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(3u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(4u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(8u, t, &ping, &pong);
+    stockham_butterfly(0u, t + 0u, &ping, &pong);
+    stockham_butterfly(0u, t + 32u, &ping, &pong);
+    stockham_butterfly(0u, t + 64u, &ping, &pong);
+    stockham_butterfly(0u, t + 96u, &ping, &pong);
+    stockham_butterfly(0u, t + 128u, &ping, &pong);
+    stockham_butterfly(0u, t + 160u, &ping, &pong);
+    stockham_butterfly(0u, t + 192u, &ping, &pong);
+    stockham_butterfly(0u, t + 224u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(1u, t + 0u, &pong, &ping);
+    stockham_butterfly(1u, t + 32u, &pong, &ping);
+    stockham_butterfly(1u, t + 64u, &pong, &ping);
+    stockham_butterfly(1u, t + 96u, &pong, &ping);
+    stockham_butterfly(1u, t + 128u, &pong, &ping);
+    stockham_butterfly(1u, t + 160u, &pong, &ping);
+    stockham_butterfly(1u, t + 192u, &pong, &ping);
+    stockham_butterfly(1u, t + 224u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(2u, t + 0u, &ping, &pong);
+    stockham_butterfly(2u, t + 32u, &ping, &pong);
+    stockham_butterfly(2u, t + 64u, &ping, &pong);
+    stockham_butterfly(2u, t + 96u, &ping, &pong);
+    stockham_butterfly(2u, t + 128u, &ping, &pong);
+    stockham_butterfly(2u, t + 160u, &ping, &pong);
+    stockham_butterfly(2u, t + 192u, &ping, &pong);
+    stockham_butterfly(2u, t + 224u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(3u, t + 0u, &pong, &ping);
+    stockham_butterfly(3u, t + 32u, &pong, &ping);
+    stockham_butterfly(3u, t + 64u, &pong, &ping);
+    stockham_butterfly(3u, t + 96u, &pong, &ping);
+    stockham_butterfly(3u, t + 128u, &pong, &ping);
+    stockham_butterfly(3u, t + 160u, &pong, &ping);
+    stockham_butterfly(3u, t + 192u, &pong, &ping);
+    stockham_butterfly(3u, t + 224u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(4u, t + 0u, &ping, &pong);
+    stockham_butterfly(4u, t + 32u, &ping, &pong);
+    stockham_butterfly(4u, t + 64u, &ping, &pong);
+    stockham_butterfly(4u, t + 96u, &ping, &pong);
+    stockham_butterfly(4u, t + 128u, &ping, &pong);
+    stockham_butterfly(4u, t + 160u, &ping, &pong);
+    stockham_butterfly(4u, t + 192u, &ping, &pong);
+    stockham_butterfly(4u, t + 224u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(5u, t + 0u, &pong, &ping);
+    stockham_butterfly(5u, t + 32u, &pong, &ping);
+    stockham_butterfly(5u, t + 64u, &pong, &ping);
+    stockham_butterfly(5u, t + 96u, &pong, &ping);
+    stockham_butterfly(5u, t + 128u, &pong, &ping);
+    stockham_butterfly(5u, t + 160u, &pong, &ping);
+    stockham_butterfly(5u, t + 192u, &pong, &ping);
+    stockham_butterfly(5u, t + 224u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(6u, t + 0u, &ping, &pong);
+    stockham_butterfly(6u, t + 32u, &ping, &pong);
+    stockham_butterfly(6u, t + 64u, &ping, &pong);
+    stockham_butterfly(6u, t + 96u, &ping, &pong);
+    stockham_butterfly(6u, t + 128u, &ping, &pong);
+    stockham_butterfly(6u, t + 160u, &ping, &pong);
+    stockham_butterfly(6u, t + 192u, &ping, &pong);
+    stockham_butterfly(6u, t + 224u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(7u, t + 0u, &pong, &ping);
+    stockham_butterfly(7u, t + 32u, &pong, &ping);
+    stockham_butterfly(7u, t + 64u, &pong, &ping);
+    stockham_butterfly(7u, t + 96u, &pong, &ping);
+    stockham_butterfly(7u, t + 128u, &pong, &ping);
+    stockham_butterfly(7u, t + 160u, &pong, &ping);
+    stockham_butterfly(7u, t + 192u, &pong, &ping);
+    stockham_butterfly(7u, t + 224u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(8u, t + 0u, &ping, &pong);
+    stockham_butterfly(8u, t + 32u, &ping, &pong);
+    stockham_butterfly(8u, t + 64u, &ping, &pong);
+    stockham_butterfly(8u, t + 96u, &ping, &pong);
+    stockham_butterfly(8u, t + 128u, &ping, &pong);
+    stockham_butterfly(8u, t + 160u, &ping, &pong);
+    stockham_butterfly(8u, t + 192u, &ping, &pong);
+    stockham_butterfly(8u, t + 224u, &ping, &pong);
 
-    fft_data[base + t]          = ping[t];
-    fft_data[base + t + 32u]    = ping[t + 32u];
-    fft_data[base + t + 64u]    = ping[t + 64u];
-    fft_data[base + t + 96u]    = ping[t + 96u];
-    fft_data[base + t + 128u]   = ping[t + 128u];
-    fft_data[base + t + 160u]   = ping[t + 160u];
-    fft_data[base + t + 192u]   = ping[t + 192u];
-    fft_data[base + t + 224u]   = ping[t + 224u];
-    fft_data[base + t + 256u]   = ping[t + 256u];
-    fft_data[base + t + 288u]   = ping[t + 288u];
-    fft_data[base + t + 320u]   = ping[t + 320u];
-    fft_data[base + t + 352u]   = ping[t + 352u];
-    fft_data[base + t + 384u]   = ping[t + 384u];
-    fft_data[base + t + 416u]   = ping[t + 416u];
-    fft_data[base + t + 448u]   = ping[t + 448u];
-    fft_data[base + t + 480u]   = ping[t + 480u];
+    fft_data[base + t]          = pong[t];
+    fft_data[base + t + 32u]    = pong[t + 32u];
+    fft_data[base + t + 64u]    = pong[t + 64u];
+    fft_data[base + t + 96u]    = pong[t + 96u];
+    fft_data[base + t + 128u]   = pong[t + 128u];
+    fft_data[base + t + 160u]   = pong[t + 160u];
+    fft_data[base + t + 192u]   = pong[t + 192u];
+    fft_data[base + t + 224u]   = pong[t + 224u];
+    fft_data[base + t + 256u]   = pong[t + 256u];
+    fft_data[base + t + 288u]   = pong[t + 288u];
+    fft_data[base + t + 320u]   = pong[t + 320u];
+    fft_data[base + t + 352u]   = pong[t + 352u];
+    fft_data[base + t + 384u]   = pong[t + 384u];
+    fft_data[base + t + 416u]   = pong[t + 416u];
+    fft_data[base + t + 448u]   = pong[t + 448u];
+    fft_data[base + t + 480u]   = pong[t + 480u];
 }
 
 @compute @workgroup_size(32)
@@ -164,32 +235,103 @@ fn fft_col_main(
     ping[rev_t16] = fft_data[(t + 480u) * w + col];
     workgroupBarrier();
 
-    stockham_butterfly(0u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(1u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(2u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(3u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(4u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(8u, t, &ping, &pong);
+    stockham_butterfly(0u, t + 0u, &ping, &pong);
+    stockham_butterfly(0u, t + 32u, &ping, &pong);
+    stockham_butterfly(0u, t + 64u, &ping, &pong);
+    stockham_butterfly(0u, t + 96u, &ping, &pong);
+    stockham_butterfly(0u, t + 128u, &ping, &pong);
+    stockham_butterfly(0u, t + 160u, &ping, &pong);
+    stockham_butterfly(0u, t + 192u, &ping, &pong);
+    stockham_butterfly(0u, t + 224u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(1u, t + 0u, &pong, &ping);
+    stockham_butterfly(1u, t + 32u, &pong, &ping);
+    stockham_butterfly(1u, t + 64u, &pong, &ping);
+    stockham_butterfly(1u, t + 96u, &pong, &ping);
+    stockham_butterfly(1u, t + 128u, &pong, &ping);
+    stockham_butterfly(1u, t + 160u, &pong, &ping);
+    stockham_butterfly(1u, t + 192u, &pong, &ping);
+    stockham_butterfly(1u, t + 224u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(2u, t + 0u, &ping, &pong);
+    stockham_butterfly(2u, t + 32u, &ping, &pong);
+    stockham_butterfly(2u, t + 64u, &ping, &pong);
+    stockham_butterfly(2u, t + 96u, &ping, &pong);
+    stockham_butterfly(2u, t + 128u, &ping, &pong);
+    stockham_butterfly(2u, t + 160u, &ping, &pong);
+    stockham_butterfly(2u, t + 192u, &ping, &pong);
+    stockham_butterfly(2u, t + 224u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(3u, t + 0u, &pong, &ping);
+    stockham_butterfly(3u, t + 32u, &pong, &ping);
+    stockham_butterfly(3u, t + 64u, &pong, &ping);
+    stockham_butterfly(3u, t + 96u, &pong, &ping);
+    stockham_butterfly(3u, t + 128u, &pong, &ping);
+    stockham_butterfly(3u, t + 160u, &pong, &ping);
+    stockham_butterfly(3u, t + 192u, &pong, &ping);
+    stockham_butterfly(3u, t + 224u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(4u, t + 0u, &ping, &pong);
+    stockham_butterfly(4u, t + 32u, &ping, &pong);
+    stockham_butterfly(4u, t + 64u, &ping, &pong);
+    stockham_butterfly(4u, t + 96u, &ping, &pong);
+    stockham_butterfly(4u, t + 128u, &ping, &pong);
+    stockham_butterfly(4u, t + 160u, &ping, &pong);
+    stockham_butterfly(4u, t + 192u, &ping, &pong);
+    stockham_butterfly(4u, t + 224u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(5u, t + 0u, &pong, &ping);
+    stockham_butterfly(5u, t + 32u, &pong, &ping);
+    stockham_butterfly(5u, t + 64u, &pong, &ping);
+    stockham_butterfly(5u, t + 96u, &pong, &ping);
+    stockham_butterfly(5u, t + 128u, &pong, &ping);
+    stockham_butterfly(5u, t + 160u, &pong, &ping);
+    stockham_butterfly(5u, t + 192u, &pong, &ping);
+    stockham_butterfly(5u, t + 224u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(6u, t + 0u, &ping, &pong);
+    stockham_butterfly(6u, t + 32u, &ping, &pong);
+    stockham_butterfly(6u, t + 64u, &ping, &pong);
+    stockham_butterfly(6u, t + 96u, &ping, &pong);
+    stockham_butterfly(6u, t + 128u, &ping, &pong);
+    stockham_butterfly(6u, t + 160u, &ping, &pong);
+    stockham_butterfly(6u, t + 192u, &ping, &pong);
+    stockham_butterfly(6u, t + 224u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(7u, t + 0u, &pong, &ping);
+    stockham_butterfly(7u, t + 32u, &pong, &ping);
+    stockham_butterfly(7u, t + 64u, &pong, &ping);
+    stockham_butterfly(7u, t + 96u, &pong, &ping);
+    stockham_butterfly(7u, t + 128u, &pong, &ping);
+    stockham_butterfly(7u, t + 160u, &pong, &ping);
+    stockham_butterfly(7u, t + 192u, &pong, &ping);
+    stockham_butterfly(7u, t + 224u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(8u, t + 0u, &ping, &pong);
+    stockham_butterfly(8u, t + 32u, &ping, &pong);
+    stockham_butterfly(8u, t + 64u, &ping, &pong);
+    stockham_butterfly(8u, t + 96u, &ping, &pong);
+    stockham_butterfly(8u, t + 128u, &ping, &pong);
+    stockham_butterfly(8u, t + 160u, &ping, &pong);
+    stockham_butterfly(8u, t + 192u, &ping, &pong);
+    stockham_butterfly(8u, t + 224u, &ping, &pong);
 
-    fft_data[t * w + col]            = ping[t];
-    fft_data[(t + 32u) * w + col]    = ping[t + 32u];
-    fft_data[(t + 64u) * w + col]    = ping[t + 64u];
-    fft_data[(t + 96u) * w + col]    = ping[t + 96u];
-    fft_data[(t + 128u) * w + col]   = ping[t + 128u];
-    fft_data[(t + 160u) * w + col]   = ping[t + 160u];
-    fft_data[(t + 192u) * w + col]   = ping[t + 192u];
-    fft_data[(t + 224u) * w + col]   = ping[t + 224u];
-    fft_data[(t + 256u) * w + col]   = ping[t + 256u];
-    fft_data[(t + 288u) * w + col]   = ping[t + 288u];
-    fft_data[(t + 320u) * w + col]   = ping[t + 320u];
-    fft_data[(t + 352u) * w + col]   = ping[t + 352u];
-    fft_data[(t + 384u) * w + col]   = ping[t + 384u];
-    fft_data[(t + 416u) * w + col]   = ping[t + 416u];
-    fft_data[(t + 448u) * w + col]   = ping[t + 448u];
-    fft_data[(t + 480u) * w + col]   = ping[t + 480u];
+    fft_data[t * w + col]            = pong[t];
+    fft_data[(t + 32u) * w + col]    = pong[t + 32u];
+    fft_data[(t + 64u) * w + col]    = pong[t + 64u];
+    fft_data[(t + 96u) * w + col]    = pong[t + 96u];
+    fft_data[(t + 128u) * w + col]   = pong[t + 128u];
+    fft_data[(t + 160u) * w + col]   = pong[t + 160u];
+    fft_data[(t + 192u) * w + col]   = pong[t + 192u];
+    fft_data[(t + 224u) * w + col]   = pong[t + 224u];
+    fft_data[(t + 256u) * w + col]   = pong[t + 256u];
+    fft_data[(t + 288u) * w + col]   = pong[t + 288u];
+    fft_data[(t + 320u) * w + col]   = pong[t + 320u];
+    fft_data[(t + 352u) * w + col]   = pong[t + 352u];
+    fft_data[(t + 384u) * w + col]   = pong[t + 384u];
+    fft_data[(t + 416u) * w + col]   = pong[t + 416u];
+    fft_data[(t + 448u) * w + col]   = pong[t + 448u];
+    fft_data[(t + 480u) * w + col]   = pong[t + 480u];
 }
 
 // ---------------------------------------------------------------------------
@@ -248,11 +390,11 @@ fn normalize_growth_main(@builtin(global_invocation_id) id: vec3<u32>) {
 // ---------------------------------------------------------------------------
 struct CaParams { width: u32, num_kernels: u32, num_channels: u32 }
 
-@group(0) @binding(14) var<storage, read> ca_u_all: array<f32>;
-@group(0) @binding(15) var<storage, read_write> ca_u_channels: array<f32>;
-@group(0) @binding(16) var<storage, read> ca_c1_flat: array<u32>;
-@group(0) @binding(17) var<storage, read> ca_c1_offsets: array<u32>;
-@group(0) @binding(18) var<uniform> ca_params: CaParams;
+@group(0) @binding(13) var<storage, read> ca_u_all: array<f32>;
+@group(0) @binding(14) var<storage, read_write> ca_u_channels: array<f32>;
+@group(0) @binding(15) var<storage, read> ca_c1_flat: array<u32>;
+@group(0) @binding(16) var<storage, read> ca_c1_offsets: array<u32>;
+@group(0) @binding(17) var<uniform> ca_params: CaParams;
 
 @compute @workgroup_size(256)
 fn channel_aggregate_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -276,9 +418,9 @@ fn channel_aggregate_main(@builtin(global_invocation_id) id: vec3<u32>) {
 // ---------------------------------------------------------------------------
 struct ScParams { width: u32, num_channels: u32 }
 
-@group(0) @binding(19) var<storage, read> sc_channels: array<f32>;
-@group(0) @binding(20) var<storage, read_write> sc_sum_out: array<f32>;
-@group(0) @binding(21) var<uniform> sc_params: ScParams;
+@group(0) @binding(18) var<storage, read> sc_channels: array<f32>;
+@group(0) @binding(19) var<storage, read_write> sc_sum_out: array<f32>;
+@group(0) @binding(20) var<uniform> sc_params: ScParams;
 
 @compute @workgroup_size(256)
 fn sum_channels_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -296,10 +438,10 @@ fn sum_channels_main(@builtin(global_invocation_id) id: vec3<u32>) {
 // ---------------------------------------------------------------------------
 struct SobelParams { width: u32, height: u32, num_fields: u32 }
 
-@group(0) @binding(22) var<storage, read> sobel_input: array<f32>;
-@group(0) @binding(23) var<storage, read_write> sobel_grad_x: array<f32>;
-@group(0) @binding(24) var<storage, read_write> sobel_grad_y: array<f32>;
-@group(0) @binding(25) var<uniform> sobel_params: SobelParams;
+@group(0) @binding(21) var<storage, read> sobel_input: array<f32>;
+@group(0) @binding(22) var<storage, read_write> sobel_grad_x: array<f32>;
+@group(0) @binding(23) var<storage, read_write> sobel_grad_y: array<f32>;
+@group(0) @binding(24) var<uniform> sobel_params: SobelParams;
 
 @compute @workgroup_size(256)
 fn sobel_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -334,14 +476,14 @@ fn sobel_main(@builtin(global_invocation_id) id: vec3<u32>) {
 // ---------------------------------------------------------------------------
 struct FlowFieldParams { width: u32, num_channels: u32, num_channels_f32: f32 }
 
-@group(0) @binding(26) var<storage, read> ff_channels: array<f32>;
-@group(0) @binding(27) var<storage, read> ff_nabla_u_x: array<f32>;
-@group(0) @binding(28) var<storage, read> ff_nabla_u_y: array<f32>;
-@group(0) @binding(29) var<storage, read> ff_nabla_a_x: array<f32>;
-@group(0) @binding(30) var<storage, read> ff_nabla_a_y: array<f32>;
-@group(0) @binding(31) var<storage, read_write> ff_flow_x: array<f32>;
-@group(0) @binding(32) var<storage, read_write> ff_flow_y: array<f32>;
-@group(0) @binding(33) var<uniform> ff_params: FlowFieldParams;
+@group(0) @binding(25) var<storage, read> ff_channels: array<f32>;
+@group(0) @binding(26) var<storage, read> ff_nabla_u_x: array<f32>;
+@group(0) @binding(27) var<storage, read> ff_nabla_u_y: array<f32>;
+@group(0) @binding(28) var<storage, read> ff_nabla_a_x: array<f32>;
+@group(0) @binding(29) var<storage, read> ff_nabla_a_y: array<f32>;
+@group(0) @binding(30) var<storage, read_write> ff_flow_x: array<f32>;
+@group(0) @binding(31) var<storage, read_write> ff_flow_y: array<f32>;
+@group(0) @binding(32) var<uniform> ff_params: FlowFieldParams;
 
 @compute @workgroup_size(256)
 fn flow_field_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -368,13 +510,13 @@ struct ReintegrationParams {
     num_channels: u32, num_kernels: u32, ma: f32,
 }
 
-@group(0) @binding(34) var<storage, read> ri_channel: array<f32>;
-@group(0) @binding(35) var<storage, read> ri_flow_x: array<f32>;
-@group(0) @binding(36) var<storage, read> ri_flow_y: array<f32>;
-@group(0) @binding(37) var<storage, read_write> ri_new_channel: array<f32>;
-@group(0) @binding(38) var<uniform> ri_params: ReintegrationParams;
-@group(0) @binding(39) var<storage, read> ri_params_field: array<f32>;
-@group(0) @binding(40) var<storage, read_write> ri_new_params_field: array<f32>;
+@group(0) @binding(33) var<storage, read> ri_channel: array<f32>;
+@group(0) @binding(34) var<storage, read> ri_flow_x: array<f32>;
+@group(0) @binding(35) var<storage, read> ri_flow_y: array<f32>;
+@group(0) @binding(36) var<storage, read_write> ri_new_channel: array<f32>;
+@group(0) @binding(37) var<uniform> ri_params: ReintegrationParams;
+@group(0) @binding(38) var<storage, read> ri_params_field: array<f32>;
+@group(0) @binding(39) var<storage, read_write> ri_new_params_field: array<f32>;
 
 @compute @workgroup_size(256)
 fn reintegration_main(@builtin(global_invocation_id) id: vec3<u32>) {

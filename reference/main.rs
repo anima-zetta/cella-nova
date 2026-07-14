@@ -1017,9 +1017,21 @@ fn main() {
     println!("=== Flowlenia (Rust port) ===");
     println!("Matching train/flowlenia.py 1:1\n");
 
+    // Parse CLI args
+    let args: Vec<String> = std::env::args().collect();
+    let grid_size: usize = if let Some(pos) = args.iter().position(|a| a == "--grid-size") {
+        args.get(pos + 1).and_then(|s| s.parse().ok()).unwrap_or(32)
+    } else {
+        32
+    };
+    assert!(
+        [32, 64, 128, 256, 512].contains(&grid_size),
+        "Grid size must be 32, 64, 128, 256, or 512"
+    );
+
     // Small test configuration
-    let SX = 32;
-    let SY = 32;
+    let SX = grid_size;
+    let SY = grid_size;
     let nb_k = 3;
     let C = 3;
 
@@ -1063,12 +1075,13 @@ fn main() {
     let mut A = Array3::<f64>::zeros((SX, SY, C));
     let cx = SX as f64 / 2.0;
     let cy = SY as f64 / 2.0;
+    let variance = (SX * SX) as f64 / 64.0;
     for i in 0..SX {
         for j in 0..SY {
             let dx = i as f64 - cx;
             let dy = j as f64 - cy;
             let dist = (dx * dx + dy * dy).sqrt();
-            let val = (-dist * dist / 16.0).exp();
+            let val = (-dist * dist / variance).exp();
             for c in 0..C {
                 A[[i, j, c]] = val * (0.5 + 0.5 * (c as f64 / C as f64));
             }

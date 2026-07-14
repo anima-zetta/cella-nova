@@ -2,6 +2,7 @@
 """Generate PNG frames from flowlenia_org.py using fixed parameters."""
 import sys
 import os
+import argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import jax.numpy as jnp
@@ -13,7 +14,13 @@ from PIL import Image
 
 os.makedirs("pngs", exist_ok=True)
 
-SX, SY, nb_k, C = 64, 64, 2, 2
+parser = argparse.ArgumentParser(description="Generate Flow Lenia PNG frames")
+parser.add_argument("--grid-size", type=int, default=64, choices=[64, 128, 256, 512],
+                    help="Grid size (default: 64)")
+args = parser.parse_args()
+
+GRID = args.grid_size
+SX, SY, nb_k, C = GRID, GRID, 2, 2
 
 params = Params(
     r=jnp.array([0.5, 0.8]),
@@ -39,14 +46,15 @@ config = Config(
 kernel_computer = KernelComputer(SX, SY, nb_k)
 compiled = kernel_computer(params)
 
-# Initialize state with a Gaussian blob
+# Initialize state with a Gaussian blob (variance scales with grid size)
 A = np.zeros((SX, SY, C), dtype=np.float64)
 cx, cy = SX/2.0, SY/2.0
+variance = (SX * SX) / 64.0
 for i in range(SX):
     for j in range(SY):
         dx, dy = i - cx, j - cy
         dist = np.sqrt(dx*dx + dy*dy)
-        val = np.exp(-dist*dist / 64.0)
+        val = np.exp(-dist*dist / variance)
         for c in range(C):
             A[i, j, c] = val * (0.5 + 0.5 * c / C)
 
@@ -76,5 +84,5 @@ for step in range(1, 51):
     arr = np.array(states.A[step-1])  # states.A has shape (steps, SX, SY, C)
     save_frame(arr, step)
 
-print("Saved 51 Python frames (step 0 + 50 steps) to pngs/")
-print("  py_frame_0000.png through py_frame_0050.png")
+print(f"Saved 51 Python frames (step 0 + 50 steps) to pngs/ ({GRID}x{GRID})")
+print(f"  py_frame_0000.png through py_frame_0050.png")

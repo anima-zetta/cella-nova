@@ -77,14 +77,45 @@ fn fft_row_main(
     ping[rev_t8] = fft_data[base + t + 224u];
     workgroupBarrier();
 
-    stockham_butterfly(0u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(1u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(2u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(3u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(4u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping);
+    stockham_butterfly(0u, t + 0u, &ping, &pong);
+    stockham_butterfly(0u, t + 32u, &ping, &pong);
+    stockham_butterfly(0u, t + 64u, &ping, &pong);
+    stockham_butterfly(0u, t + 96u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(1u, t + 0u, &pong, &ping);
+    stockham_butterfly(1u, t + 32u, &pong, &ping);
+    stockham_butterfly(1u, t + 64u, &pong, &ping);
+    stockham_butterfly(1u, t + 96u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(2u, t + 0u, &ping, &pong);
+    stockham_butterfly(2u, t + 32u, &ping, &pong);
+    stockham_butterfly(2u, t + 64u, &ping, &pong);
+    stockham_butterfly(2u, t + 96u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(3u, t + 0u, &pong, &ping);
+    stockham_butterfly(3u, t + 32u, &pong, &ping);
+    stockham_butterfly(3u, t + 64u, &pong, &ping);
+    stockham_butterfly(3u, t + 96u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(4u, t + 0u, &ping, &pong);
+    stockham_butterfly(4u, t + 32u, &ping, &pong);
+    stockham_butterfly(4u, t + 64u, &ping, &pong);
+    stockham_butterfly(4u, t + 96u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(5u, t + 0u, &pong, &ping);
+    stockham_butterfly(5u, t + 32u, &pong, &ping);
+    stockham_butterfly(5u, t + 64u, &pong, &ping);
+    stockham_butterfly(5u, t + 96u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(6u, t + 0u, &ping, &pong);
+    stockham_butterfly(6u, t + 32u, &ping, &pong);
+    stockham_butterfly(6u, t + 64u, &ping, &pong);
+    stockham_butterfly(6u, t + 96u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(7u, t + 0u, &pong, &ping);
+    stockham_butterfly(7u, t + 32u, &pong, &ping);
+    stockham_butterfly(7u, t + 64u, &pong, &ping);
+    stockham_butterfly(7u, t + 96u, &pong, &ping);
 
     fft_data[base + t]          = ping[t];
     fft_data[base + t + 32u]    = ping[t + 32u];
@@ -123,14 +154,45 @@ fn fft_col_main(
     ping[rev_t8] = fft_data[(t + 224u) * w + col];
     workgroupBarrier();
 
-    stockham_butterfly(0u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(1u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(2u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(3u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(4u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping); workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong); workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping);
+    stockham_butterfly(0u, t + 0u, &ping, &pong);
+    stockham_butterfly(0u, t + 32u, &ping, &pong);
+    stockham_butterfly(0u, t + 64u, &ping, &pong);
+    stockham_butterfly(0u, t + 96u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(1u, t + 0u, &pong, &ping);
+    stockham_butterfly(1u, t + 32u, &pong, &ping);
+    stockham_butterfly(1u, t + 64u, &pong, &ping);
+    stockham_butterfly(1u, t + 96u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(2u, t + 0u, &ping, &pong);
+    stockham_butterfly(2u, t + 32u, &ping, &pong);
+    stockham_butterfly(2u, t + 64u, &ping, &pong);
+    stockham_butterfly(2u, t + 96u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(3u, t + 0u, &pong, &ping);
+    stockham_butterfly(3u, t + 32u, &pong, &ping);
+    stockham_butterfly(3u, t + 64u, &pong, &ping);
+    stockham_butterfly(3u, t + 96u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(4u, t + 0u, &ping, &pong);
+    stockham_butterfly(4u, t + 32u, &ping, &pong);
+    stockham_butterfly(4u, t + 64u, &ping, &pong);
+    stockham_butterfly(4u, t + 96u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(5u, t + 0u, &pong, &ping);
+    stockham_butterfly(5u, t + 32u, &pong, &ping);
+    stockham_butterfly(5u, t + 64u, &pong, &ping);
+    stockham_butterfly(5u, t + 96u, &pong, &ping);
+    workgroupBarrier();
+    stockham_butterfly(6u, t + 0u, &ping, &pong);
+    stockham_butterfly(6u, t + 32u, &ping, &pong);
+    stockham_butterfly(6u, t + 64u, &ping, &pong);
+    stockham_butterfly(6u, t + 96u, &ping, &pong);
+    workgroupBarrier();
+    stockham_butterfly(7u, t + 0u, &pong, &ping);
+    stockham_butterfly(7u, t + 32u, &pong, &ping);
+    stockham_butterfly(7u, t + 64u, &pong, &ping);
+    stockham_butterfly(7u, t + 96u, &pong, &ping);
 
     fft_data[t * w + col]            = ping[t];
     fft_data[(t + 32u) * w + col]    = ping[t + 32u];
@@ -198,11 +260,11 @@ fn normalize_growth_main(@builtin(global_invocation_id) id: vec3<u32>) {
 // ---------------------------------------------------------------------------
 struct CaParams { width: u32, num_kernels: u32, num_channels: u32 }
 
-@group(0) @binding(14) var<storage, read> ca_u_all: array<f32>;
-@group(0) @binding(15) var<storage, read_write> ca_u_channels: array<f32>;
-@group(0) @binding(16) var<storage, read> ca_c1_flat: array<u32>;
-@group(0) @binding(17) var<storage, read> ca_c1_offsets: array<u32>;
-@group(0) @binding(18) var<uniform> ca_params: CaParams;
+@group(0) @binding(13) var<storage, read> ca_u_all: array<f32>;
+@group(0) @binding(14) var<storage, read_write> ca_u_channels: array<f32>;
+@group(0) @binding(15) var<storage, read> ca_c1_flat: array<u32>;
+@group(0) @binding(16) var<storage, read> ca_c1_offsets: array<u32>;
+@group(0) @binding(17) var<uniform> ca_params: CaParams;
 
 @compute @workgroup_size(256)
 fn channel_aggregate_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -226,9 +288,9 @@ fn channel_aggregate_main(@builtin(global_invocation_id) id: vec3<u32>) {
 // ---------------------------------------------------------------------------
 struct ScParams { width: u32, num_channels: u32 }
 
-@group(0) @binding(19) var<storage, read> sc_channels: array<f32>;
-@group(0) @binding(20) var<storage, read_write> sc_sum_out: array<f32>;
-@group(0) @binding(21) var<uniform> sc_params: ScParams;
+@group(0) @binding(18) var<storage, read> sc_channels: array<f32>;
+@group(0) @binding(19) var<storage, read_write> sc_sum_out: array<f32>;
+@group(0) @binding(20) var<uniform> sc_params: ScParams;
 
 @compute @workgroup_size(256)
 fn sum_channels_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -246,10 +308,10 @@ fn sum_channels_main(@builtin(global_invocation_id) id: vec3<u32>) {
 // ---------------------------------------------------------------------------
 struct SobelParams { width: u32, height: u32, num_fields: u32 }
 
-@group(0) @binding(22) var<storage, read> sobel_input: array<f32>;
-@group(0) @binding(23) var<storage, read_write> sobel_grad_x: array<f32>;
-@group(0) @binding(24) var<storage, read_write> sobel_grad_y: array<f32>;
-@group(0) @binding(25) var<uniform> sobel_params: SobelParams;
+@group(0) @binding(21) var<storage, read> sobel_input: array<f32>;
+@group(0) @binding(22) var<storage, read_write> sobel_grad_x: array<f32>;
+@group(0) @binding(23) var<storage, read_write> sobel_grad_y: array<f32>;
+@group(0) @binding(24) var<uniform> sobel_params: SobelParams;
 
 @compute @workgroup_size(256)
 fn sobel_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -284,14 +346,14 @@ fn sobel_main(@builtin(global_invocation_id) id: vec3<u32>) {
 // ---------------------------------------------------------------------------
 struct FlowFieldParams { width: u32, num_channels: u32, num_channels_f32: f32 }
 
-@group(0) @binding(26) var<storage, read> ff_channels: array<f32>;
-@group(0) @binding(27) var<storage, read> ff_nabla_u_x: array<f32>;
-@group(0) @binding(28) var<storage, read> ff_nabla_u_y: array<f32>;
-@group(0) @binding(29) var<storage, read> ff_nabla_a_x: array<f32>;
-@group(0) @binding(30) var<storage, read> ff_nabla_a_y: array<f32>;
-@group(0) @binding(31) var<storage, read_write> ff_flow_x: array<f32>;
-@group(0) @binding(32) var<storage, read_write> ff_flow_y: array<f32>;
-@group(0) @binding(33) var<uniform> ff_params: FlowFieldParams;
+@group(0) @binding(25) var<storage, read> ff_channels: array<f32>;
+@group(0) @binding(26) var<storage, read> ff_nabla_u_x: array<f32>;
+@group(0) @binding(27) var<storage, read> ff_nabla_u_y: array<f32>;
+@group(0) @binding(28) var<storage, read> ff_nabla_a_x: array<f32>;
+@group(0) @binding(29) var<storage, read> ff_nabla_a_y: array<f32>;
+@group(0) @binding(30) var<storage, read_write> ff_flow_x: array<f32>;
+@group(0) @binding(31) var<storage, read_write> ff_flow_y: array<f32>;
+@group(0) @binding(32) var<uniform> ff_params: FlowFieldParams;
 
 @compute @workgroup_size(256)
 fn flow_field_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -318,13 +380,13 @@ struct ReintegrationParams {
     num_channels: u32, num_kernels: u32, ma: f32,
 }
 
-@group(0) @binding(34) var<storage, read> ri_channel: array<f32>;
-@group(0) @binding(35) var<storage, read> ri_flow_x: array<f32>;
-@group(0) @binding(36) var<storage, read> ri_flow_y: array<f32>;
-@group(0) @binding(37) var<storage, read_write> ri_new_channel: array<f32>;
-@group(0) @binding(38) var<uniform> ri_params: ReintegrationParams;
-@group(0) @binding(39) var<storage, read> ri_params_field: array<f32>;
-@group(0) @binding(40) var<storage, read_write> ri_new_params_field: array<f32>;
+@group(0) @binding(33) var<storage, read> ri_channel: array<f32>;
+@group(0) @binding(34) var<storage, read> ri_flow_x: array<f32>;
+@group(0) @binding(35) var<storage, read> ri_flow_y: array<f32>;
+@group(0) @binding(36) var<storage, read_write> ri_new_channel: array<f32>;
+@group(0) @binding(37) var<uniform> ri_params: ReintegrationParams;
+@group(0) @binding(38) var<storage, read> ri_params_field: array<f32>;
+@group(0) @binding(39) var<storage, read_write> ri_new_params_field: array<f32>;
 
 @compute @workgroup_size(256)
 fn reintegration_main(@builtin(global_invocation_id) id: vec3<u32>) {

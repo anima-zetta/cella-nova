@@ -1,5 +1,5 @@
 // -*- coding: utf-8 -*-
-// Generate PNG frames using the fl-rs GPU implementation at 64x64.
+// Generate PNG frames using the fl-rs GPU implementation.
 #![allow(non_snake_case, dead_code)]
 
 mod orchestrator;
@@ -8,8 +8,6 @@ mod wfft;
 use orchestrator::GpuFlowLenia;
 use std::sync::Arc;
 use wfft::WgpuContext;
-
-const GRID_SIZE: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Kernel generation (matches Python's generate_kernels_fft)
@@ -99,6 +97,7 @@ fn generate_kernels_fft(size: usize) -> Vec<Vec<num_complex::Complex32>> {
 
 fn generate_seed(size: usize, num_channels: usize) -> Vec<Vec<f64>> {
     let mut channels = Vec::with_capacity(num_channels);
+    let variance = (size * size) as f64 / 64.0;
     for c in 0..num_channels {
         let mut ch = vec![0.0f64; size * size];
         let cx = size as f64 / 2.0;
@@ -108,7 +107,7 @@ fn generate_seed(size: usize, num_channels: usize) -> Vec<Vec<f64>> {
                 let dx = i as f64 - cx;
                 let dy = j as f64 - cy;
                 let dist = (dx * dx + dy * dy).sqrt();
-                let val = (-dist * dist / 64.0).exp();
+                let val = (-dist * dist / variance).exp();
                 ch[i * size + j] = val * (0.5 + 0.5 * c as f64 / num_channels as f64);
             }
         }
@@ -171,7 +170,18 @@ fn save_png(data: &[f32], size: usize, path: &str) {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let shape = GRID_SIZE.next_power_of_two();
+    let args: Vec<String> = std::env::args().collect();
+    let grid_size: usize = if let Some(pos) = args.iter().position(|a| a == "--grid-size") {
+        args.get(pos + 1).and_then(|s| s.parse().ok()).unwrap_or(64)
+    } else {
+        64
+    };
+    assert!(
+        [64, 128, 256, 512].contains(&grid_size),
+        "Grid size must be 64, 128, 256, or 512"
+    );
+
+    let shape = grid_size.next_power_of_two();
     let num_channels: usize = 2;
     let num_kernels: usize = 2;
     let num_steps: usize = 50;
