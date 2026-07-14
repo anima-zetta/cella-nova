@@ -53,3 +53,5 @@ Currently, finding interesting behaviors in Flow Lenia relies heavily on externa
 [18] [https://arxiv.org](https://arxiv.org/html/2505.15998v4)
 [19] [https://hal.science](https://hal.science/hal-05333302v1/file/2505.15998v2.pdf)
 [20] [https://www.youtube.com](https://www.youtube.com/watch?v=G5P8eu6gUSo&t=1539)
+
+https://arxiv.org/pdf/2505.15998
