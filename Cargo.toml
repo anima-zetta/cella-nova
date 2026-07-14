@@ -7,14 +7,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [[bin]]
-name = "reference"
-path = "reference/main.rs"
-
-[[bin]]
-name = "save_pngs"
-path = "reference/save_pngs.rs"
-
-[[bin]]
 name = "fl-rs"
 path = "fl-rs/main.rs"
 
@@ -24,7 +16,6 @@ path = "fl-rs/save_pngs.rs"
 
 [dependencies]
 winit = "0.28"
-ndarray = "0.15.6"
 num-complex = "0.4.2"
 wgpu = "0.16"
 pollster = "0.4"
@@ -32,5 +23,4 @@ bytemuck = { version = "1.16", features = ["extern_crate_alloc", "derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rustfft = "6.2"
-rand = "0.8"
 image = "0.24"

@@ -48,7 +48,6 @@ def sample_creature_config(num_kernels: int) -> dict[str, Any]:
     w = [[random.uniform(0.01, 0.5) for _ in range(3)] for _ in range(num_kernels)]
 
     # Random seed: multiple Gaussian blobs at random positions
-    num_blobs = random.randint(1, 5)
     seed_params = []
     for _ in range(NUM_CHANNELS):
         # Each channel gets a random combination of blobs
