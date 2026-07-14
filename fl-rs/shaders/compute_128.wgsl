@@ -176,7 +176,6 @@ struct GrowthParams { m: f32, s: f32, h: f32 }
 
 @group(0) @binding(8) var<storage, read_write> ng_data: array<vec2<f32>>;
 @group(0) @binding(9) var<storage, read_write> ng_result: array<f32>;
-@group(0) @binding(10) var<storage, read_write> ng_conv_x: array<f32>;
 @group(0) @binding(11) var<uniform> ng_norm_params: NormalizeParams;
 @group(0) @binding(12) var<storage, read> ng_growth_params: GrowthParams;
 @group(0) @binding(13) var<storage, read> ng_params_field: array<f32>;
@@ -190,7 +189,6 @@ fn normalize_growth_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let diff: f32 = x - ng_growth_params.m;
     let g: f32 = exp(-(diff * diff) / (2.0 * ng_growth_params.s * ng_growth_params.s));
     ng_result[i] = (2.0 * g - 1.0) * ng_growth_params.h * ng_params_field[i];
-    ng_conv_x[i] = x;
 }
 
 // ---------------------------------------------------------------------------

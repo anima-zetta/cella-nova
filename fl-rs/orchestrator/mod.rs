@@ -125,7 +125,6 @@ impl GpuFlowLenia {
 
         let u_size = (total_elements * num_kernels * 4) as u64;
         let u_buffer = make_storage("fl::u", u_size);
-        let conv_x_buffer = make_storage("fl::conv_x", u_size);
 
         let uc_size = (total_elements * num_channels * 4) as u64;
         let u_channel_buffer = make_storage("fl::u_channel", uc_size);
@@ -157,13 +156,16 @@ impl GpuFlowLenia {
             shape,
             total_elements,
             num_kernels,
+            num_channels,
             kernel_m,
             kernel_s,
             kernel_h,
+            c0,
             conv_buffer, // move ownership
             conv_saved_buffer,
+            &channel_buffer,
+            &kernel_buffer,
             &u_buffer,
-            conv_x_buffer,
             &param_buffer,
         );
 
@@ -330,17 +332,15 @@ impl GpuFlowLenia {
         let wg_k = ((total * self.num_kernels as u32) + 255) / 256;
 
         // ================================================================
-        // Phase 1: Per-kernel convolution + growth
-        //
-        // Group kernels by source channel to share forward FFTs:
-        //   FFT each unique channel once, save frequency-domain result,
-        //   then restore + multiply + IFFT for each kernel in the group.
+        // Single combined encoder: all phases in one submit.
+        // The GPU handles buffer dependencies between dispatches internally.
         // ================================================================
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("fl::phase1"),
+            label: Some("fl::iterate"),
         });
 
+        // Phase 1: Per-kernel convolution + growth
         self.convolution.run(
             device,
             &mut encoder,
@@ -353,16 +353,6 @@ impl GpuFlowLenia {
             &self.shape,
         );
 
-        queue.submit(Some(encoder.finish()));
-
-        // ================================================================
-        // Phase 2: Aggregation, gradients, flow, advection
-        // ================================================================
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("fl::phase2"),
-        });
-
         // Phase 2a: Channel aggregation (kernel growths → per-channel sums)
         self.aggregation.run(&mut encoder, wg_c);
 
@@ -372,18 +362,7 @@ impl GpuFlowLenia {
         // Phase 2c: Semi-Lagrangian advection (density)
         self.advection.run(&mut encoder, wg_c);
 
-        // Phase 2d: Semi-Lagrangian advection (parameter field)
-        self.param_advection.run(&mut encoder, wg_k);
-
-        queue.submit(Some(encoder.finish()));
-
-        // ================================================================
-        // Phase 3: Swap new → current for both density and params
-        // ================================================================
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("fl::swap"),
-        });
+        // Phase 3: Swap new → current for density
         encoder.copy_buffer_to_buffer(
             &self.new_channel_buffer,
             0,
@@ -391,13 +370,7 @@ impl GpuFlowLenia {
             0,
             (self.total_elements * self.num_channels * 4) as u64,
         );
-        encoder.copy_buffer_to_buffer(
-            &self.new_param_buffer,
-            0,
-            &self.param_buffer,
-            0,
-            (self.total_elements * self.num_kernels * 4) as u64,
-        );
+
         queue.submit(Some(encoder.finish()));
     }
 }

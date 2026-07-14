@@ -42,6 +42,12 @@ pub struct ConvolutionPhase {
     // Per-kernel normalize+growth bind groups
     normalize_growth_bgs: Vec<wgpu::BindGroup>,
 
+    // Cached per-kernel bind groups (created once in new(), reused in run())
+    copy_bgs_cache: Vec<Vec<wgpu::BindGroup>>,
+    cmul_bgs_cache: Vec<Vec<wgpu::BindGroup>>,
+
+    // Cached channel-to-kernel mapping
+    ch_to_kernels_cache: Vec<Vec<usize>>,
 }
 
 impl ConvolutionPhase {
@@ -52,15 +58,18 @@ impl ConvolutionPhase {
         shape: &[usize],
         total_elements: usize,
         num_kernels: usize,
+        num_channels: usize,
         kernel_m: &[f32],
         kernel_s: &[f32],
         kernel_h: &[f32],
+        c0: &[u32],
         // Owned buffers (only used within this phase)
         conv_buffer: wgpu::Buffer,
         conv_saved_buffer: wgpu::Buffer,
         // Shared buffers (references: owned by GpuFlowLenia)
+        channel_buffer: &wgpu::Buffer,
+        kernel_buffer: &wgpu::Buffer,
         u_buffer: &wgpu::Buffer,
-        conv_x_buffer: wgpu::Buffer,
         param_buffer: &wgpu::Buffer,
     ) -> Self {
         // --- Twiddle factors (Stockham arrangement) ---
@@ -179,7 +188,7 @@ impl ConvolutionPhase {
         let normalize_growth_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("fl::normalize_growth bgl"),
-                entries: &[srw(8), srw(9), srw(10), unif(11), sro(12), sro(13)],
+                entries: &[srw(8), srw(9), unif(11), sro(12), sro(13)],
             });
         let fft_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fl::fft bgl"),
@@ -301,14 +310,6 @@ impl ConvolutionPhase {
                         }),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 10,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &conv_x_buffer,
-                            offset: u_offset,
-                            size: u_size,
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
                         binding: 11,
                         resource: normalize_params_buffer.as_entire_binding(),
                     },
@@ -332,6 +333,72 @@ impl ConvolutionPhase {
             }));
         }
 
+        // --- Pre-compute per-kernel bind groups (cached, reused every iteration) ---
+        let mut ch_to_kernels_cache: Vec<Vec<usize>> = Vec::new();
+        ch_to_kernels_cache.resize_with(num_channels, Vec::new);
+        for k in 0..num_kernels {
+            ch_to_kernels_cache[c0[k] as usize].push(k);
+        }
+
+        let mut copy_bgs_cache: Vec<Vec<wgpu::BindGroup>> = Vec::new();
+        let mut cmul_bgs_cache: Vec<Vec<wgpu::BindGroup>> = Vec::new();
+        for kernels in &ch_to_kernels_cache {
+            if kernels.is_empty() {
+                copy_bgs_cache.push(Vec::new());
+                cmul_bgs_cache.push(Vec::new());
+                continue;
+            }
+            let mut copy_bgs = Vec::with_capacity(kernels.len());
+            let mut cmul_bgs = Vec::with_capacity(kernels.len());
+            for &k in kernels {
+                let src_c = c0[k] as usize;
+                let ch_offset = (src_c * total_elements * 4) as u64;
+                let k_offset = (k * total_elements * 8) as u64;
+                let ch_size = std::num::NonZeroU64::new((total_elements * 4) as u64);
+                let k_size = std::num::NonZeroU64::new((total_elements * 8) as u64);
+
+                copy_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("fl::copy_bg k={k}")),
+                    layout: &copy_to_conv_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: channel_buffer,
+                                offset: ch_offset,
+                                size: ch_size,
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: conv_buffer.as_entire_binding(),
+                        },
+                    ],
+                }));
+
+                cmul_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("fl::cmul_bg k={k}")),
+                    layout: &complex_mul_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: conv_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: kernel_buffer,
+                                offset: k_offset,
+                                size: k_size,
+                            }),
+                        },
+                    ],
+                }));
+            }
+            copy_bgs_cache.push(copy_bgs);
+            cmul_bgs_cache.push(cmul_bgs);
+        }
+
         Self {
             fft_row_pipeline,
             fft_col_pipeline,
@@ -345,6 +412,9 @@ impl ConvolutionPhase {
             normalize_growth_bgs,
             conv_buffer,
             conv_saved_buffer,
+            copy_bgs_cache,
+            cmul_bgs_cache,
+            ch_to_kernels_cache,
         }
     }
 
@@ -354,11 +424,11 @@ impl ConvolutionPhase {
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-        channel_buffer: &wgpu::Buffer,
-        kernel_buffer: &wgpu::Buffer,
-        c0: &[u32],
-        num_kernels: usize,
-        num_channels: usize,
+        _channel_buffer: &wgpu::Buffer,
+        _kernel_buffer: &wgpu::Buffer,
+        _c0: &[u32],
+        _num_kernels: usize,
+        _num_channels: usize,
         total_elements: usize,
         shape: &[usize],
     ) {
@@ -366,66 +436,13 @@ impl ConvolutionPhase {
         let sz = shape[0] as u32;
         let conv_buf_size = (total_elements * 8) as u64;
 
-        // Build source-channel → kernel-indices mapping
-        let mut ch_to_kernels: Vec<Vec<usize>> = Vec::new();
-        ch_to_kernels.resize_with(num_channels, Vec::new);
-        for k in 0..num_kernels {
-            ch_to_kernels[c0[k] as usize].push(k);
-        }
-
-        for kernels in &ch_to_kernels {
+        for (gi, kernels) in self.ch_to_kernels_cache.iter().enumerate() {
             if kernels.is_empty() {
                 continue;
             }
 
-            // Create per-kernel bind groups for this group
-            let mut copy_bgs = Vec::with_capacity(kernels.len());
-            let mut cmul_bgs = Vec::with_capacity(kernels.len());
-            for &k in kernels {
-                let src_c = c0[k] as usize;
-                let ch_offset = (src_c * total_elements * 4) as u64;
-                let k_offset = (k * total_elements * 8) as u64;
-                let ch_size = std::num::NonZeroU64::new((total_elements * 4) as u64);
-                let k_size = std::num::NonZeroU64::new((total_elements * 8) as u64);
-
-                copy_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&format!("fl::copy_bg k={k}")),
-                    layout: &self.copy_to_conv_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: channel_buffer,
-                                offset: ch_offset,
-                                size: ch_size,
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 5,
-                            resource: self.conv_buffer.as_entire_binding(),
-                        },
-                    ],
-                }));
-
-                cmul_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&format!("fl::cmul_bg k={k}")),
-                    layout: &self.complex_mul_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 6,
-                            resource: self.conv_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 7,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: kernel_buffer,
-                                offset: k_offset,
-                                size: k_size,
-                            }),
-                        },
-                    ],
-                }));
-            }
+            let copy_bgs = &self.copy_bgs_cache[gi];
+            let cmul_bgs = &self.cmul_bgs_cache[gi];
 
             // Step 1: Copy channel → conv (first kernel's source channel)
             self.dispatch(
@@ -498,7 +515,6 @@ impl ConvolutionPhase {
             }
         }
     }
-
 
     /// Helper: begin a compute pass, set pipeline + bind group, dispatch.
     fn dispatch(
