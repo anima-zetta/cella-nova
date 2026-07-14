@@ -373,4 +373,94 @@ impl GpuFlowLenia {
 
         queue.submit(Some(encoder.finish()));
     }
+
+    /// Performs a single iteration with per-phase GPU timing.
+    /// Each phase uses a separate submit + device.poll() to measure time.
+    /// This adds overhead but gives a rough breakdown.
+    pub fn timed_iterate(&self) -> [f64; 6] {
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+        let total = self.total_elements as u32;
+        let wg = (total + 255) / 256;
+        let wg_c = ((total * self.num_channels as u32) + 255) / 256;
+        let mut times = [0.0f64; 6];
+
+        // Phase 1: Convolution
+        let start = std::time::Instant::now();
+        {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fl::timed_conv"),
+            });
+            self.convolution.run(
+                device,
+                &mut encoder,
+                &self.channel_buffer,
+                &self.kernel_buffer,
+                &self.c0,
+                self.num_kernels,
+                self.num_channels,
+                self.total_elements,
+                &self.shape,
+            );
+            queue.submit(Some(encoder.finish()));
+        }
+        device.poll(wgpu::Maintain::Wait);
+        times[0] = start.elapsed().as_secs_f64() * 1000.0;
+
+        // Phase 2a: Aggregation
+        let start = std::time::Instant::now();
+        {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fl::timed_agg"),
+            });
+            self.aggregation.run(&mut encoder, wg_c);
+            queue.submit(Some(encoder.finish()));
+        }
+        device.poll(wgpu::Maintain::Wait);
+        times[1] = start.elapsed().as_secs_f64() * 1000.0;
+
+        // Phase 2b: Gradient flow (Sobel + flow field)
+        let start = std::time::Instant::now();
+        {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fl::timed_grad"),
+            });
+            self.gradient_flow.run(&mut encoder, wg, wg_c);
+            queue.submit(Some(encoder.finish()));
+        }
+        device.poll(wgpu::Maintain::Wait);
+        times[2] = start.elapsed().as_secs_f64() * 1000.0;
+
+        // Phase 2c: Advection
+        let start = std::time::Instant::now();
+        {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fl::timed_adv"),
+            });
+            self.advection.run(&mut encoder, wg_c);
+            queue.submit(Some(encoder.finish()));
+        }
+        device.poll(wgpu::Maintain::Wait);
+        times[3] = start.elapsed().as_secs_f64() * 1000.0;
+
+        // Phase 3: Buffer copy
+        let start = std::time::Instant::now();
+        {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fl::timed_copy"),
+            });
+            encoder.copy_buffer_to_buffer(
+                &self.new_channel_buffer,
+                0,
+                &self.channel_buffer,
+                0,
+                (self.total_elements * self.num_channels * 4) as u64,
+            );
+            queue.submit(Some(encoder.finish()));
+        }
+        device.poll(wgpu::Maintain::Wait);
+        times[4] = start.elapsed().as_secs_f64() * 1000.0;
+
+        times
+    }
 }
