@@ -445,7 +445,7 @@ fn reintegration_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
 @compute @workgroup_size(256)
 fn reintegration_params_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let idx: u32 = id.x;
+    let idx: u32 = id.x + id.y * 16776960u;
     let total: u32 = ri_params.width * ri_params.height * ri_params.num_kernels;
     if (idx >= total) { return; }
     let k: u32 = idx / (ri_params.width * ri_params.height);

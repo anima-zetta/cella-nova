@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate kernel and seed data for a single 64x64 Flow Lenia creature.
+Generate kernel and seed data for Flow Lenia creatures.
 
 The creature is stored grid-size independently:
   kernels/<name>_512.bin  — FFT kernels at 512x512 (for Rust simulator)
@@ -11,9 +11,11 @@ Both the Python training (256x256) and Rust simulation (512x512) load the
 same seed and pad it to their respective grid sizes.
 """
 
+import argparse
 import json
 import math
 import os
+import random
 import struct
 from typing import Any
 
@@ -25,6 +27,59 @@ GRID_256: int = 256          # training grid (spatial kernels stored at this siz
 SEED_SIZE: int = 64
 NUM_CHANNELS: int = 3
 
+# ---------------------------------------------------------------------------
+# Random creature sampling
+# ---------------------------------------------------------------------------
+
+def sample_creature_config(num_kernels: int) -> dict[str, Any]:
+    """Sample a random creature configuration within the specified ranges."""
+    # Neighborhood
+    global_r = random.uniform(2.0, 25.0)
+    radii = [random.uniform(0.2, 1.0) for _ in range(num_kernels)]
+
+    # Growth functions (per kernel)
+    growth_m = [random.uniform(0.05, 0.5) for _ in range(num_kernels)]
+    growth_s = [random.uniform(0.001, 0.2) for _ in range(num_kernels)]
+    growth_h = [random.uniform(0.0, 1.0) for _ in range(num_kernels)]
+
+    # Kernel flow params (per kernel, 3 channels each)
+    a = [[random.uniform(0.0, 1.0) for _ in range(3)] for _ in range(num_kernels)]
+    b = [[random.uniform(0.0, 1.0) for _ in range(3)] for _ in range(num_kernels)]
+    w = [[random.uniform(0.01, 0.5) for _ in range(3)] for _ in range(num_kernels)]
+
+    # Random seed: multiple Gaussian blobs at random positions
+    num_blobs = random.randint(1, 5)
+    seed_params = []
+    for _ in range(NUM_CHANNELS):
+        # Each channel gets a random combination of blobs
+        sigma = random.uniform(0.1, 0.4)
+        offset_x = random.uniform(-0.3, 0.3)
+        offset_y = random.uniform(-0.3, 0.3)
+        amplitude = random.uniform(0.3, 1.0)
+        seed_params.append({
+            "sigma": sigma,
+            "offset_x": offset_x,
+            "offset_y": offset_y,
+            "amplitude": amplitude,
+        })
+
+    return {
+        "num_kernels": num_kernels,
+        "global_r": global_r,
+        "radii": radii,
+        "growth_m": growth_m,
+        "growth_s": growth_s,
+        "growth_h": growth_h,
+        "a": a,
+        "w": w,
+        "b": b,
+        "seed_params": seed_params,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Kernel generation
+# ---------------------------------------------------------------------------
 
 def generate_kernels_fft(
     size: int, num_kernels: int, global_r: float,
@@ -76,6 +131,10 @@ def generate_kernels_spatial(
     return kernels
 
 
+# ---------------------------------------------------------------------------
+# Seed generation
+# ---------------------------------------------------------------------------
+
 def generate_seed_channels(
     size: int, num_channels: int,
     channel_configs: list[dict[str, float]],
@@ -95,6 +154,10 @@ def generate_seed_channels(
                 channels[c][idx] = max(0.0, min(1.0, val * amp))
     return channels
 
+
+# ---------------------------------------------------------------------------
+# I/O
+# ---------------------------------------------------------------------------
 
 def save_kernels_fft_bin(kernels: list[npt.NDArray[np.complex64]], path: str) -> None:
     with open(path, "wb") as f:
@@ -126,6 +189,10 @@ def save_seed_json(seed_channels, bump_params, growth_params, path):
         json.dump(data, f, indent=2)
     print(f"  Saved {path} ({os.path.getsize(path) / 1024:.1f} KB)")
 
+
+# ---------------------------------------------------------------------------
+# Creature generation
+# ---------------------------------------------------------------------------
 
 def generate_creature(name: str, config: dict[str, Any]) -> None:
     print(f"\n=== {name} ===")
@@ -164,89 +231,28 @@ def generate_creature(name: str, config: dict[str, Any]) -> None:
     save_seed_json(seed_channels, bump_params, growth_params, f"seed/{name}.json")
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main() -> None:
-    # A 64x64 creature with rich, asymmetric patterns
-    # Uses the original glider's bump parameters (global_r=42) for complex dynamics
-    glider = {
-        "num_kernels": 9,
-        "global_r": 42.0,
-        "radii": [0.8, 0.6, 1.0, 0.7, 0.5, 0.9, 0.65, 0.55, 0.85],
-        "growth_m": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        "growth_s": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
-        "growth_h": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        "a": [
-            [0.0, 0.6, 0.0],
-            [0.0, 0.5, 0.0],
-            [0.0, 0.7, 0.0],
-            [0.0, 0.55, 0.0],
-            [0.0, 0.45, 0.0],
-            [0.0, 0.65, 0.0],
-            [0.0, 0.5, 0.0],
-            [0.0, 0.6, 0.0],
-            [0.0, 0.55, 0.0],
-        ],
-        "w": [
-            [0.08, 0.06, 0.01],
-            [0.07, 0.05, 0.01],
-            [0.09, 0.07, 0.01],
-            [0.08, 0.06, 0.01],
-            [0.07, 0.05, 0.01],
-            [0.09, 0.07, 0.01],
-            [0.08, 0.06, 0.01],
-            [0.07, 0.05, 0.01],
-            [0.08, 0.06, 0.01],
-        ],
-        "b": [
-            [0.8, -0.3, 0.0],
-            [0.7, -0.25, 0.0],
-            [0.9, -0.35, 0.0],
-            [0.75, -0.3, 0.0],
-            [0.65, -0.2, 0.0],
-            [0.85, -0.35, 0.0],
-            [0.7, -0.25, 0.0],
-            [0.6, -0.2, 0.0],
-            [0.8, -0.3, 0.0],
-        ],
-        "seed_params": [
-            {"sigma": 0.50, "offset_x": 0.0, "offset_y": 0.0},
-            {"sigma": 0.44, "offset_x": 0.08, "offset_y": 0.0},
-            {"sigma": 0.56, "offset_x": 0.0, "offset_y": 0.08},
-        ],
-    }
+    parser = argparse.ArgumentParser(description="Generate random Flow Lenia creatures")
+    parser.add_argument("--num-creatures", type=int, required=True,
+                        help="Number of random creatures to generate")
+    parser.add_argument("--num-kernels", type=int, default=5,
+                        help="Number of kernels per creature (default: 5)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducibility")
+    args = parser.parse_args()
 
-    generate_creature("glider", glider)
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
 
-    # A simple 3-kernel creature matching the test parameters from save_frames_png.py
-    test = {
-        "num_kernels": 3,
-        "global_r": 10.0,
-        "radii": [0.5, 0.8, 0.65],
-        "growth_m": [0.1, 0.15, 0.12],
-        "growth_s": [0.05, 0.08, 0.065],
-        "growth_h": [0.5, 0.8, 0.65],
-        "a": [
-            [0.0, 0.5, 0.0],
-            [0.0, 0.4, 0.0],
-            [0.0, 0.45, 0.0],
-        ],
-        "w": [
-            [0.1, 0.05, 0.01],
-            [0.08, 0.06, 0.01],
-            [0.09, 0.055, 0.01],
-        ],
-        "b": [
-            [0.5, 0.3, 0.0],
-            [0.7, 0.2, 0.0],
-            [0.6, 0.25, 0.0],
-        ],
-        "seed_params": [
-            {"sigma": 0.25, "offset_x": 0.0, "offset_y": 0.0, "amplitude": 0.5},
-            {"sigma": 0.25, "offset_x": 0.0, "offset_y": 0.0, "amplitude": 0.6667},
-            {"sigma": 0.25, "offset_x": 0.0, "offset_y": 0.0, "amplitude": 0.8333},
-        ],
-    }
-
-    generate_creature("test", test)
+    for i in range(args.num_creatures):
+        name = f"random_{i:04d}"
+        config = sample_creature_config(args.num_kernels)
+        generate_creature(name, config)
 
 
 if __name__ == "__main__":

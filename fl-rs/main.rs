@@ -11,28 +11,66 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
 const GRID_SIZE: usize = 512;
+const CELL_SIZE: usize = 64;
+const CELLS_PER_ROW: usize = GRID_SIZE / CELL_SIZE; // 8
 
 // ---------------------------------------------------------------------------
-// CLI
+// Creature config (subset of the JSON)
 // ---------------------------------------------------------------------------
 
-fn creature_name() -> String {
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(pos) = args.iter().position(|a| a == "--creature") {
-        args.get(pos + 1)
-            .cloned()
-            .unwrap_or_else(|| "glider".to_string())
-    } else {
-        panic!("Provide creature name");
-    }
+#[derive(Deserialize)]
+struct GrowthParams {
+    m: Vec<f32>,
+    s: Vec<f32>,
+    h: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+struct BumpParams {
+    num_kernels: usize,
+}
+
+#[derive(Deserialize)]
+struct CreatureConfig {
+    seed_size: usize,
+    num_channels: usize,
+    seed_channels: Vec<Vec<f64>>,
+    bump_params: BumpParams,
+    growth_params: GrowthParams,
+}
+
+// ---------------------------------------------------------------------------
+// Load all random creatures from seed/
+// ---------------------------------------------------------------------------
+
+fn discover_creatures() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir("seed")
+        .expect("Failed to read seed/ directory")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let file_name = path.file_stem()?.to_str()?.to_string();
+            if file_name.starts_with("random_") && path.extension()? == "json" {
+                Some(file_name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn load_creature_config(name: &str) -> CreatureConfig {
+    let path = format!("seed/{}.json", name);
+    let config_str =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read {}", path));
+    serde_json::from_str(&config_str).unwrap_or_else(|_| panic!("Failed to parse {}", path))
 }
 
 // ---------------------------------------------------------------------------
 // Kernel loading (pre-FFT'd at GRID_SIZE)
 // ---------------------------------------------------------------------------
 
-/// Load pre-computed FFT kernels from binary file.
-/// Format: for each kernel, `size * size` complex values as interleaved f32 (real, imag).
 fn load_kernels_fft(
     path: &str,
     num_kernels: usize,
@@ -59,67 +97,6 @@ fn load_kernels_fft(
 }
 
 // ---------------------------------------------------------------------------
-// Seed loading (grid-size independent: stored at seed_size, padded to grid)
-// ---------------------------------------------------------------------------
-
-fn load_seed(
-    creature: &str,
-    grid_size: usize,
-) -> (Vec<Vec<f64>>, Vec<f32>, Vec<f32>, Vec<f32>, usize, usize) {
-    #[derive(Deserialize)]
-    struct GrowthParams {
-        m: Vec<f32>,
-        s: Vec<f32>,
-        h: Vec<f32>,
-    }
-
-    #[derive(Deserialize)]
-    struct BumpParams {
-        num_kernels: usize,
-    }
-
-    #[derive(Deserialize)]
-    struct CreatureConfig {
-        seed_size: usize,
-        num_channels: usize,
-        seed_channels: Vec<Vec<f64>>,
-        bump_params: BumpParams,
-        growth_params: GrowthParams,
-    }
-
-    let path = format!("seed/{}.json", creature);
-    let config_str = std::fs::read_to_string(&path).expect(&format!("Failed to read {}", path));
-    let config: CreatureConfig =
-        serde_json::from_str(&config_str).expect(&format!("Failed to parse {}", path));
-
-    let seed_size = config.seed_size;
-    let pad = (grid_size - seed_size) / 2;
-
-    let mut padded: Vec<Vec<f64>> = Vec::with_capacity(config.seed_channels.len());
-    for ch in &config.seed_channels {
-        let mut p = vec![0.0f64; grid_size * grid_size];
-        for iy in 0..seed_size {
-            for ix in 0..seed_size {
-                let src_idx = iy * seed_size + ix;
-                let dst_idx = (pad + iy) * grid_size + (pad + ix);
-                p[dst_idx] = ch[src_idx];
-            }
-        }
-        padded.push(p);
-    }
-
-    let gp = config.growth_params;
-    (
-        padded,
-        gp.m,
-        gp.s,
-        gp.h,
-        config.num_channels,
-        config.bump_params.num_kernels,
-    )
-}
-
-// ---------------------------------------------------------------------------
 // Render shaders
 // ---------------------------------------------------------------------------
 
@@ -130,6 +107,52 @@ const RENDER_SHADER: &str = include_str!("shaders/render.wgsl");
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // --- Discover creatures ---
+    let creature_names = discover_creatures();
+    let num_creatures = creature_names.len();
+    assert!(
+        num_creatures > 0,
+        "No random_* creatures found in seed/ directory"
+    );
+    println!("Found {} creatures", num_creatures);
+
+    // Load all creature configs
+    let configs: Vec<CreatureConfig> = creature_names
+        .iter()
+        .map(|name| load_creature_config(name))
+        .collect();
+
+    // Compute totals
+    let num_channels: usize = configs[0].num_channels; // all creatures have the same
+    let num_kernels: usize = configs.iter().map(|c| c.bump_params.num_kernels).sum();
+
+    // Build flat arrays
+    let mut all_kernel_m: Vec<f32> = Vec::with_capacity(num_kernels);
+    let mut all_kernel_s: Vec<f32> = Vec::with_capacity(num_kernels);
+    let mut all_kernel_h: Vec<f32> = Vec::with_capacity(num_kernels);
+    for config in &configs {
+        all_kernel_m.extend(&config.growth_params.m);
+        all_kernel_s.extend(&config.growth_params.s);
+        all_kernel_h.extend(&config.growth_params.h);
+    }
+
+    // Build C0/C1 mapping: simple round-robin across channels
+    let c0: Vec<u32> = (0..num_kernels as u32)
+        .map(|k| k % num_channels as u32)
+        .collect();
+    let c1: Vec<Vec<u32>> = (0..num_channels)
+        .map(|c| {
+            (0..num_kernels as u32)
+                .filter(|&k| k % num_channels as u32 == c as u32)
+                .collect()
+        })
+        .collect();
+
+    println!(
+        "{} channels, {} kernels, {} creatures",
+        num_channels, num_kernels, num_creatures
+    );
+
     // --- Interactive mode ---
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
@@ -265,25 +288,6 @@ fn main() {
     let dd: i32 = 5;
     let sigma: f32 = 0.65;
 
-    let creature = creature_name();
-    println!("Creature: {}", creature);
-
-    // Load seed + growth params + dimensions from creature file
-    let (seed_channels, kernel_m, kernel_s, kernel_h, num_channels, num_kernels) =
-        load_seed(&creature, GRID_SIZE);
-
-    // Build C0/C1 mapping: simple 1:1 (kernel k reads from channel k, output goes to channel k)
-    let c0: Vec<u32> = (0..num_kernels as u32)
-        .map(|k| k % num_channels as u32)
-        .collect();
-    let c1: Vec<Vec<u32>> = (0..num_channels)
-        .map(|c| {
-            (0..num_kernels as u32)
-                .filter(|&k| k % num_channels as u32 == c as u32)
-                .collect()
-        })
-        .collect();
-
     let game = GpuFlowLenia::new(
         Arc::clone(&context),
         &[shape, shape],
@@ -291,24 +295,52 @@ fn main() {
         num_kernels,
         &c0,
         &c1,
-        &kernel_m,
-        &kernel_s,
-        &kernel_h,
+        &all_kernel_m,
+        &all_kernel_s,
+        &all_kernel_h,
         dt,
         dd,
         sigma,
     );
 
-    // Load pre-FFT'd kernels from file (generated by Python at GRID_SIZE)
-    let kernel_path = format!("kernels/{}_512.bin", creature);
-    let kernels_fft = load_kernels_fft(&kernel_path, num_kernels, shape);
-    for (k, kfft) in kernels_fft.iter().enumerate() {
-        game.set_kernel(kfft, k);
+    // --- Upload seeds: place each creature in its 8x8 cell ---
+    // Accumulate all creatures into a single buffer per channel, then upload once.
+    let seed_size = configs[0].seed_size; // 64
+    let mut channel_buffers: Vec<Vec<f64>> = (0..num_channels)
+        .map(|_| vec![0.0f64; GRID_SIZE * GRID_SIZE])
+        .collect();
+    for (ci, config) in configs.iter().enumerate() {
+        let row = ci / CELLS_PER_ROW;
+        let col = ci % CELLS_PER_ROW;
+        let offset_x = col * CELL_SIZE;
+        let offset_y = row * CELL_SIZE;
+
+        for c in 0..config.num_channels {
+            let src = &config.seed_channels[c];
+            for iy in 0..seed_size {
+                for ix in 0..seed_size {
+                    let dst_idx = (offset_y + iy) * GRID_SIZE + (offset_x + ix);
+                    let src_idx = iy * seed_size + ix;
+                    channel_buffers[c][dst_idx] = src[src_idx];
+                }
+            }
+        }
+    }
+    for (c, buf) in channel_buffers.iter().enumerate() {
+        game.upload_channel(buf, c);
     }
 
-    // Upload padded seed
-    for (c, data) in seed_channels.iter().enumerate() {
-        game.upload_channel(data, c);
+    // --- Load and upload kernels ---
+    let mut kernel_offset = 0;
+    for (ci, config) in configs.iter().enumerate() {
+        let name = &creature_names[ci];
+        let nk = config.bump_params.num_kernels;
+        let kernel_path = format!("kernels/{}_512.bin", name);
+        let kernels_fft = load_kernels_fft(&kernel_path, nk, shape);
+        for (k, kfft) in kernels_fft.iter().enumerate() {
+            game.set_kernel(kfft, kernel_offset + k);
+        }
+        kernel_offset += nk;
     }
 
     // --- Render bind group ---
@@ -334,8 +366,14 @@ fn main() {
 
     println!("Flow Lenia: GPU-Accelerated Mass-Conserving CA");
     println!(
-        "{} channels, {} kernels, {}x{} grid",
-        num_channels, num_kernels, GRID_SIZE, GRID_SIZE
+        "{} channels, {} kernels, {}x{} grid, {} creatures in {}x{} grid",
+        num_channels,
+        num_kernels,
+        GRID_SIZE,
+        GRID_SIZE,
+        num_creatures,
+        CELLS_PER_ROW,
+        CELLS_PER_ROW
     );
     println!("Reintegration tracking: dd={}, sigma={}", dd, sigma);
 
@@ -360,8 +398,8 @@ fn main() {
                 if elapsed >= 1.0 {
                     let fps = frame_count as f64 / elapsed;
                     window.set_title(&format!(
-                        "Flow Lenia GPU -- {:.0} FPS ({}x{} grid, {}ch, {}kernels)",
-                        fps, GRID_SIZE, GRID_SIZE, num_channels, num_kernels
+                        "Flow Lenia GPU -- {:.0} FPS ({}x{} grid, {}ch, {}kernels, {} creatures)",
+                        fps, GRID_SIZE, GRID_SIZE, num_channels, num_kernels, num_creatures
                     ));
                     last_fps_time = now;
                     frame_count = 0;

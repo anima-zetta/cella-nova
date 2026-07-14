@@ -778,11 +778,23 @@ impl ParamAdvectionPhase {
     }
 
     pub fn run(&self, encoder: &mut wgpu::CommandEncoder, wg_count: u32) {
-        let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("ri_param"),
-        });
-        p.set_pipeline(&self.pipeline);
-        p.set_bind_group(0, &self.bind_group, &[]);
-        p.dispatch_workgroups(wg_count, 1, 1);
+        const MAX_WG: u32 = 65535;
+        if wg_count <= MAX_WG {
+            let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ri_param"),
+            });
+            p.set_pipeline(&self.pipeline);
+            p.set_bind_group(0, &self.bind_group, &[]);
+            p.dispatch_workgroups(wg_count, 1, 1);
+        } else {
+            let wg_x = MAX_WG;
+            let wg_y = (wg_count + wg_x - 1) / wg_x;
+            let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ri_param"),
+            });
+            p.set_pipeline(&self.pipeline);
+            p.set_bind_group(0, &self.bind_group, &[]);
+            p.dispatch_workgroups(wg_x, wg_y, 1);
+        }
     }
 }
