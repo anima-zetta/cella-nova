@@ -47,6 +47,10 @@ def sample_creature_config(num_kernels: int) -> dict[str, Any]:
     b = [[random.uniform(0.0, 1.0) for _ in range(3)] for _ in range(num_kernels)]
     w = [[random.uniform(0.01, 0.5) for _ in range(3)] for _ in range(num_kernels)]
 
+    # Directional bias (per kernel) — makes kernels asymmetric to drive movement
+    direction = [random.uniform(0.0, 2.0 * math.pi) for _ in range(num_kernels)]
+    direction_strength = [random.uniform(0.3, 1.0) for _ in range(num_kernels)]
+
     # Random seed: multiple Gaussian blobs at random positions
     seed_params = []
     for _ in range(NUM_CHANNELS):
@@ -72,6 +76,8 @@ def sample_creature_config(num_kernels: int) -> dict[str, Any]:
         "a": a,
         "w": w,
         "b": b,
+        "direction": direction,
+        "direction_strength": direction_strength,
         "seed_params": seed_params,
     }
 
@@ -84,10 +90,13 @@ def generate_kernels_fft(
     size: int, num_kernels: int, global_r: float,
     radii: npt.NDArray[np.float64], a: npt.NDArray[np.float64],
     w: npt.NDArray[np.float64], b: npt.NDArray[np.float64],
+    direction: list[float] | None = None,
+    direction_strength: list[float] | None = None,
 ) -> list[npt.NDArray[np.complex64]]:
     mid = size // 2
     i, j = np.meshgrid(np.arange(size), np.arange(size), indexing="ij")
     dist = np.sqrt((i - mid) ** 2 + (j - mid) ** 2)
+    angle = np.arctan2(j - mid, i - mid)  # angle from center
     kernels = []
     for k in range(num_kernels):
         d_scaled = dist / ((global_r + 15.0) * radii[k])
@@ -97,6 +106,10 @@ def generate_kernels_fft(
             diff = d_scaled - a[k, p]
             ker_val += b[k, p] * np.exp(-(diff * diff) / w[k, p])
         kernel_real = sig * ker_val
+        # Apply directional bias: stronger on one side, weaker on the other
+        if direction is not None and direction_strength is not None:
+            directional = 1.0 + direction_strength[k] * np.cos(angle - direction[k])
+            kernel_real = kernel_real * directional
         total = kernel_real.sum()
         if total > 0.0:
             kernel_real /= total
@@ -110,10 +123,13 @@ def generate_kernels_spatial(
     size: int, num_kernels: int, global_r: float,
     radii: npt.NDArray[np.float64], a: npt.NDArray[np.float64],
     w: npt.NDArray[np.float64], b: npt.NDArray[np.float64],
+    direction: list[float] | None = None,
+    direction_strength: list[float] | None = None,
 ) -> list[npt.NDArray[np.float32]]:
     mid = size // 2
     i, j = np.meshgrid(np.arange(size), np.arange(size), indexing="ij")
     dist = np.sqrt((i - mid) ** 2 + (j - mid) ** 2)
+    angle = np.arctan2(j - mid, i - mid)  # angle from center
     kernels = []
     for k in range(num_kernels):
         d_scaled = dist / ((global_r + 15.0) * radii[k])
@@ -123,6 +139,10 @@ def generate_kernels_spatial(
             diff = d_scaled - a[k, p]
             ker_val += b[k, p] * np.exp(-(diff * diff) / w[k, p])
         kernel_real = sig * ker_val
+        # Apply directional bias
+        if direction is not None and direction_strength is not None:
+            directional = 1.0 + direction_strength[k] * np.cos(angle - direction[k])
+            kernel_real = kernel_real * directional
         total = kernel_real.sum()
         if total > 0.0:
             kernel_real /= total
@@ -201,6 +221,7 @@ def generate_creature(name: str, config: dict[str, Any]) -> None:
         GRID_512, num_kernels, config["global_r"],
         np.array(config["radii"]), np.array(config["a"]),
         np.array(config["w"]), np.array(config["b"]),
+        config.get("direction"), config.get("direction_strength"),
     )
     print(f"  FFT kernels: {num_kernels} x {GRID_512}x{GRID_512} complex64")
 
@@ -208,6 +229,7 @@ def generate_creature(name: str, config: dict[str, Any]) -> None:
         GRID_256, num_kernels, config["global_r"],
         np.array(config["radii"]), np.array(config["a"]),
         np.array(config["w"]), np.array(config["b"]),
+        config.get("direction"), config.get("direction_strength"),
     )
     print(f"  Spatial kernels: {num_kernels} x {GRID_256}x{GRID_256} float32")
 
