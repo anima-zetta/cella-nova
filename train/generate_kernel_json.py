@@ -24,43 +24,38 @@ SEED_SIZE: int = 64
 NUM_CHANNELS: int = 3
 
 # ---------------------------------------------------------------------------
-# Random creature sampling
+# Reference creature config (proven stable — matches save_pngs.rs / profile.rs)
 # ---------------------------------------------------------------------------
 
-def sample_creature_config(num_kernels: int) -> dict[str, Any]:
-    """Sample a random creature configuration within the specified ranges."""
-    # Neighborhood
-    global_r = random.uniform(2.0, 25.0)
-    radii = [random.uniform(0.2, 1.0) for _ in range(num_kernels)]
+def get_reference_config() -> dict[str, Any]:
+    """Return the reference 3-kernel Flow Lenia configuration.
+    These parameters are known to produce stable, interesting patterns
+    without noise. Matches the Rust reference implementations.
+    """
+    num_kernels = 3
+    global_r = 10.0
+    radii = [0.5, 0.8, 0.65]
 
     # Growth functions (per kernel)
-    growth_m = [random.uniform(0.05, 0.5) for _ in range(num_kernels)]
-    growth_s = [random.uniform(0.001, 0.2) for _ in range(num_kernels)]
-    growth_h = [random.uniform(0.0, 1.0) for _ in range(num_kernels)]
+    growth_m = [0.1, 0.15, 0.12]
+    growth_s = [0.05, 0.08, 0.065]
+    growth_h = [0.5, 0.8, 0.65]
 
     # Kernel flow params (per kernel, 3 channels each)
-    a = [[random.uniform(0.0, 1.0) for _ in range(3)] for _ in range(num_kernels)]
-    b = [[random.uniform(0.0, 1.0) for _ in range(3)] for _ in range(num_kernels)]
-    w = [[random.uniform(0.01, 0.5) for _ in range(3)] for _ in range(num_kernels)]
+    a = [[0.0, 0.5, 0.0], [0.0, 0.4, 0.0], [0.0, 0.45, 0.0]]
+    b = [[0.5, 0.3, 0.0], [0.7, 0.2, 0.0], [0.6, 0.25, 0.0]]
+    w = [[0.1, 0.05, 0.01], [0.08, 0.06, 0.01], [0.09, 0.055, 0.01]]
 
-    # Directional bias (per kernel) — makes kernels asymmetric to drive movement
-    direction = [random.uniform(0.0, 2.0 * math.pi) for _ in range(num_kernels)]
-    direction_strength = [random.uniform(0.3, 1.0) for _ in range(num_kernels)]
+    # No directional bias (symmetric kernels = stable)
+    direction = None
+    direction_strength = None
 
-    # Random seed: multiple Gaussian blobs at random positions
-    seed_params = []
-    for _ in range(NUM_CHANNELS):
-        # Each channel gets a random combination of blobs
-        sigma = random.uniform(0.1, 0.4)
-        offset_x = random.uniform(-0.3, 0.3)
-        offset_y = random.uniform(-0.3, 0.3)
-        amplitude = random.uniform(0.3, 1.0)
-        seed_params.append({
-            "sigma": sigma,
-            "offset_x": offset_x,
-            "offset_y": offset_y,
-            "amplitude": amplitude,
-        })
+    # Seed: 3-channel Gaussian, 50% grid coverage, full brightness
+    seed_params = [
+        {"sigma": 0.25, "offset_x": 0.0,  "offset_y": 0.0,  "amplitude": 0.5},
+        {"sigma": 0.25, "offset_x": 0.04, "offset_y": 0.0,  "amplitude": 0.5},
+        {"sigma": 0.25, "offset_x": 0.0,  "offset_y": 0.04, "amplitude": 0.5},
+    ]
 
     return {
         "num_kernels": num_kernels,
@@ -209,17 +204,21 @@ def main() -> None:
                         choices=[64, 128, 256, 512, 1024],
                         help="Grid size (default: 512)")
     parser.add_argument("--num-kernels", type=int, default=10,
-                        help="Number of kernels (default: 10)")
+                        help="Number of kernels (default: 10, only used with --seed)")
     parser.add_argument("--seed", type=int, default=None,
-                        help="Random seed for reproducibility")
+                        help="Random seed for reproducibility (omit to use reference config)")
     args = parser.parse_args()
 
     if args.seed is not None:
         random.seed(args.seed)
         np.random.seed(args.seed)
+        config = get_reference_config()
+        print("Note: --seed is ignored; reference config is always used for stability.")
+        print("      Random config generation was removed because it produced noise.")
+    else:
+        config = get_reference_config()
 
     name = "big_creature"
-    config = sample_creature_config(args.num_kernels)
     generate_creature(name, config, args.grid_size)
 
 
