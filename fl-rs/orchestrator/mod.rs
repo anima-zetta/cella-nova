@@ -29,8 +29,9 @@ fn select_compute_shader(grid_size: usize) -> &'static str {
         128 => include_str!("../shaders/compute_128.wgsl"),
         256 => include_str!("../shaders/compute_256.wgsl"),
         512 => include_str!("../shaders/compute_512.wgsl"),
+        1024 => include_str!("../shaders/compute_1024.wgsl"),
         _ => panic!(
-            "Unsupported grid size: {}. Supported sizes: 64, 128, 256, 512",
+            "Unsupported grid size: {}. Supported sizes: 64, 128, 256, 512, 1024",
             grid_size
         ),
     }

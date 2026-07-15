@@ -16,7 +16,7 @@ use wfft::WgpuContext;
 #[derive(Parser)]
 #[command(name = "fl-rs", about = "Flow Lenia GPU simulation")]
 struct Cli {
-    /// Grid size (must be power of two, e.g. 64, 128, 256, 512)
+    /// Grid size (must be power of two, e.g. 64, 128, 256, 512, 1024)
     #[arg(long, default_value = "512")]
     grid_size: usize,
 
@@ -116,19 +116,66 @@ fn load_kernels_fft(
     size: usize,
 ) -> Vec<Vec<num_complex::Complex32>> {
     let data = std::fs::read(path).expect("Failed to read kernel FFT file");
-    let expected = num_kernels * size * size * 8;
-    assert_eq!(data.len(), expected, "Kernel FFT file size mismatch");
+    let file_size = data.len();
+    let kernel_bytes = file_size / num_kernels;
+    let kernel_elems = kernel_bytes / 8;
+    let src_size = (kernel_elems as f64).sqrt() as usize;
 
     let mut kernels = Vec::with_capacity(num_kernels);
     let kernel_len = size * size;
+
     for k in 0..num_kernels {
-        let mut kernel = Vec::with_capacity(kernel_len);
-        let base = k * kernel_len * 8;
-        for i in 0..kernel_len {
-            let offset = base + i * 8;
-            let re = f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
-            let im = f32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap());
-            kernel.push(num_complex::Complex32::new(re, im));
+        let mut kernel = vec![num_complex::Complex32::new(0.0, 0.0); kernel_len];
+        let base = k * kernel_bytes;
+
+        if src_size == size {
+            // Same size: read directly
+            for i in 0..kernel_len {
+                let offset = base + i * 8;
+                let re = f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                let im = f32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap());
+                kernel[i] = num_complex::Complex32::new(re, im);
+            }
+        } else {
+            // Read source FFT kernel (stored as fft2(ifftshift(spatial)))
+            let mut src = vec![num_complex::Complex32::new(0.0, 0.0); src_size * src_size];
+            for i in 0..src_size * src_size {
+                let offset = base + i * 8;
+                let re = f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                let im = f32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap());
+                src[i] = num_complex::Complex32::new(re, im);
+            }
+
+            // fftshift: move DC from corners to center
+            let half_src = src_size / 2;
+            let mut centered = vec![num_complex::Complex32::new(0.0, 0.0); src_size * src_size];
+            for i in 0..src_size {
+                for j in 0..src_size {
+                    let ni = (i + half_src) % src_size;
+                    let nj = (j + half_src) % src_size;
+                    centered[ni * src_size + nj] = src[i * src_size + j];
+                }
+            }
+
+            // Place in center of larger FFT array (zero-pad high frequencies)
+            let pad = (size - src_size) / 2;
+            for i in 0..src_size {
+                for j in 0..src_size {
+                    kernel[(pad + i) * size + (pad + j)] = centered[i * src_size + j];
+                }
+            }
+
+            // ifftshift: move DC from center back to corners
+            let half_dst = size / 2;
+            let mut result = vec![num_complex::Complex32::new(0.0, 0.0); kernel_len];
+            for i in 0..size {
+                for j in 0..size {
+                    let ni = (i + half_dst) % size;
+                    let nj = (j + half_dst) % size;
+                    result[ni * size + nj] = kernel[i * size + j];
+                }
+            }
+            kernel = result;
         }
         kernels.push(kernel);
     }
@@ -210,7 +257,11 @@ fn setup_simulation(cli: &Cli) -> (Arc<WgpuContext>, GpuFlowLenia, usize) {
         &wgpu::DeviceDescriptor {
             label: Some("Flow Lenia Device"),
             features: wgpu::Features::empty(),
-            limits: wgpu::Limits::default(),
+            limits: wgpu::Limits {
+                max_buffer_size: 2 << 30,
+                max_storage_buffer_binding_size: 2 << 30,
+                ..Default::default()
+            },
         },
         None,
     ))

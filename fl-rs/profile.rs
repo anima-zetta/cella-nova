@@ -119,8 +119,8 @@ fn main() {
         512
     };
     assert!(
-        [64, 128, 256, 512].contains(&grid_size),
-        "Grid size must be 64, 128, 256, or 512"
+        [64, 128, 256, 512, 1024].contains(&grid_size),
+        "Grid size must be 64, 128, 256, 512, or 1024"
     );
 
     let shape = grid_size.next_power_of_two();
@@ -153,7 +153,11 @@ fn main() {
         &wgpu::DeviceDescriptor {
             label: Some("Flow Lenia Device"),
             features: wgpu::Features::empty(),
-            limits: wgpu::Limits::default(),
+            limits: wgpu::Limits {
+                max_buffer_size: 2 << 30,
+                max_storage_buffer_binding_size: 2 << 30,
+                ..Default::default()
+            },
         },
         None,
     ))
