@@ -20,10 +20,6 @@ struct Cli {
     #[arg(long, default_value = "512")]
     grid_size: usize,
 
-    /// Cell size for creature placement grid (default: grid_size / 8)
-    #[arg(long, default_value_t = 0)]
-    cell_size: usize,
-
     /// Simulation time step
     #[arg(long, default_value_t = 0.2)]
     dt: f32,
@@ -79,25 +75,8 @@ struct CreatureConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Load all random creatures from seed/
+// Load creature config from seed/
 // ---------------------------------------------------------------------------
-
-fn discover_creatures() -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir("seed")
-        .expect("Failed to read seed/ directory")
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            let file_name = path.file_stem()?.to_str()?.to_string();
-            if file_name.starts_with("random_") && path.extension()? == "json" {
-                Some(file_name)
-            } else {
-                None
-            }
-        })
-        .collect();
-    names.sort();
-    names
-}
 
 fn load_creature_config(name: &str) -> CreatureConfig {
     let path = format!("seed/{}.json", name);
@@ -189,61 +168,28 @@ fn load_kernels_fft(
 fn setup_simulation(cli: &Cli) -> (Arc<WgpuContext>, GpuFlowLenia, usize) {
     let grid_size = cli.grid_size;
 
-    // Discover creatures
-    let creature_names = discover_creatures();
-    let num_creatures = creature_names.len();
-    assert!(
-        num_creatures > 0,
-        "No random_* creatures found in seed/ directory"
-    );
-    println!("Found {} creatures", num_creatures);
-
-    // Load all creature configs
-    let configs: Vec<CreatureConfig> = creature_names
-        .iter()
-        .map(|name| load_creature_config(name))
-        .collect();
-
-    // Cell size defaults to seed size (so one creature fits in one cell)
-    let seed_size = configs[0].seed_size;
-    let cell_size = if cli.cell_size == 0 {
-        seed_size
-    } else {
-        cli.cell_size
-    };
-    let cells_per_row = grid_size / cell_size;
-
-    // Compute totals
-    let num_channels: usize = configs[0].num_channels;
-    let num_kernels: usize = configs.iter().map(|c| c.bump_params.num_kernels).sum();
+    // Load the single creature config
+    let config = load_creature_config("big_creature");
+    let num_channels = config.num_channels;
+    let num_kernels = config.bump_params.num_kernels;
 
     // Build flat arrays
-    let mut all_kernel_m: Vec<f32> = Vec::with_capacity(num_kernels);
-    let mut all_kernel_s: Vec<f32> = Vec::with_capacity(num_kernels);
-    let mut all_kernel_h: Vec<f32> = Vec::with_capacity(num_kernels);
-    for config in &configs {
-        all_kernel_m.extend(&config.growth_params.m);
-        all_kernel_s.extend(&config.growth_params.s);
-        all_kernel_h.extend(&config.growth_params.h);
-    }
+    let all_kernel_m: Vec<f32> = config.growth_params.m.clone();
+    let all_kernel_s: Vec<f32> = config.growth_params.s.clone();
+    let all_kernel_h: Vec<f32> = config.growth_params.h.clone();
 
     // Build C0/C1 mapping: cyclic channel relationship.
-    // Channel 0 -> Channel 1, Channel 1 -> Channel 2, Channel 2 -> Channel 0
     let c0: Vec<u32> = (0..num_kernels as u32)
         .map(|k| k % num_channels as u32)
         .collect();
     let c1: Vec<Vec<u32>> = (0..num_channels)
         .map(|c| {
-            // Channel c receives from kernels whose source is (c + 2) % 3
             let src = ((c as u32) + 2) % 3;
             (0..num_kernels as u32).filter(|&k| k % 3 == src).collect()
         })
         .collect();
 
-    println!(
-        "{} channels, {} kernels, {} creatures",
-        num_channels, num_kernels, num_creatures
-    );
+    println!("{} channels, {} kernels", num_channels, num_kernels);
 
     // wgpu setup (headless)
     let instance = wgpu::Instance::default();
@@ -288,54 +234,22 @@ fn setup_simulation(cli: &Cli) -> (Arc<WgpuContext>, GpuFlowLenia, usize) {
         cli.sigma,
     );
 
-    // Upload seeds
-    let mut channel_buffers: Vec<Vec<f64>> = (0..num_channels)
-        .map(|_| vec![0.0f64; grid_size * grid_size])
-        .collect();
-    for (ci, config) in configs.iter().enumerate() {
-        let row = ci / cells_per_row;
-        let col = ci % cells_per_row;
-        let offset_x = col * cell_size;
-        let offset_y = row * cell_size;
-
-        for c in 0..config.num_channels {
-            let src = &config.seed_channels[c];
-            for iy in 0..seed_size {
-                for ix in 0..seed_size {
-                    let dst_idx = (offset_y + iy) * grid_size + (offset_x + ix);
-                    let src_idx = iy * seed_size + ix;
-                    channel_buffers[c][dst_idx] = src[src_idx];
-                }
-            }
-        }
-    }
-    for (c, buf) in channel_buffers.iter().enumerate() {
-        game.upload_channel(buf, c);
+    // Upload seed (already at the right grid size)
+    for (c, data) in config.seed_channels.iter().enumerate() {
+        game.upload_channel(data, c);
     }
 
-    // Load and upload kernels
-    let mut kernel_offset = 0;
-    for (ci, config) in configs.iter().enumerate() {
-        let name = &creature_names[ci];
-        let nk = config.bump_params.num_kernels;
-        let kernel_path = format!("kernels/{}_512.bin", name);
-        let kernels_fft = load_kernels_fft(&kernel_path, nk, shape);
-        for (k, kfft) in kernels_fft.iter().enumerate() {
-            game.set_kernel(kfft, kernel_offset + k);
-        }
-        kernel_offset += nk;
+    // Load and upload kernels (file matches grid size)
+    let kernel_path = format!("kernels/big_creature_{}.bin", grid_size);
+    let kernels_fft = load_kernels_fft(&kernel_path, num_kernels, shape);
+    for (k, kfft) in kernels_fft.iter().enumerate() {
+        game.set_kernel(kfft, k);
     }
 
     println!("Flow Lenia: GPU-Accelerated Mass-Conserving CA");
     println!(
-        "{} channels, {} kernels, {}x{} grid, {} creatures in {}x{} grid",
-        num_channels,
-        num_kernels,
-        grid_size,
-        grid_size,
-        num_creatures,
-        cells_per_row,
-        cells_per_row
+        "{} channels, {} kernels, {}x{} grid",
+        num_channels, num_kernels, grid_size, grid_size,
     );
     println!("Reintegration tracking: dd={}, sigma={}", cli.dd, cli.sigma);
 

@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """
-Generate kernel and seed data for Flow Lenia creatures.
+Generate kernel and seed data for a single big Flow Lenia creature
+at a specific grid size.
 
-The creature is stored grid-size independently:
-  kernels/<name>_512.bin  — FFT kernels at 512x512 (for Rust simulator)
-  kernels/<name>_256.bin  — spatial kernels at 128x128 (for Python training)
-  seed/<name>.json        — 64x64 seed + bump params + growth params
-
-Both the Python training (256x256) and Rust simulation (512x512) load the
-same seed and pad it to their respective grid sizes.
+  kernels/big_creature_{grid_size}.bin  — FFT kernels at grid_size x grid_size
+  seed/big_creature.json        — seed at grid_size + bump params + growth params
 """
 
 import argparse
@@ -119,37 +115,6 @@ def generate_kernels_fft(
     return kernels
 
 
-def generate_kernels_spatial(
-    size: int, num_kernels: int, global_r: float,
-    radii: npt.NDArray[np.float64], a: npt.NDArray[np.float64],
-    w: npt.NDArray[np.float64], b: npt.NDArray[np.float64],
-    direction: list[float] | None = None,
-    direction_strength: list[float] | None = None,
-) -> list[npt.NDArray[np.float32]]:
-    mid = size // 2
-    i, j = np.meshgrid(np.arange(size), np.arange(size), indexing="ij")
-    dist = np.sqrt((i - mid) ** 2 + (j - mid) ** 2)
-    angle = np.arctan2(j - mid, i - mid)  # angle from center
-    kernels = []
-    for k in range(num_kernels):
-        d_scaled = dist / ((global_r + 15.0) * radii[k])
-        sig = 0.5 * (np.tanh((-d_scaled + 1.0) * 5.0) + 1.0)
-        ker_val = np.zeros_like(d_scaled)
-        for p in range(3):
-            diff = d_scaled - a[k, p]
-            ker_val += b[k, p] * np.exp(-(diff * diff) / w[k, p])
-        kernel_real = sig * ker_val
-        # Apply directional bias
-        if direction is not None and direction_strength is not None:
-            directional = 1.0 + direction_strength[k] * np.cos(angle - direction[k])
-            kernel_real = kernel_real * directional
-        total = kernel_real.sum()
-        if total > 0.0:
-            kernel_real /= total
-        kernels.append(kernel_real.astype(np.float32))
-    return kernels
-
-
 # ---------------------------------------------------------------------------
 # Seed generation
 # ---------------------------------------------------------------------------
@@ -187,15 +152,6 @@ def save_kernels_fft_bin(kernels: list[npt.NDArray[np.complex64]], path: str) ->
     print(f"  Saved {path} ({os.path.getsize(path) / 1024 / 1024:.1f} MB)")
 
 
-def save_kernels_spatial_bin(kernels: list[npt.NDArray[np.float32]], path: str) -> None:
-    with open(path, "wb") as f:
-        for kspatial in kernels:
-            flat = kspatial.ravel()
-            for val in flat:
-                _ = f.write(struct.pack("f", val.item()))
-    print(f"  Saved {path} ({os.path.getsize(path) / 1024 / 1024:.1f} MB)")
-
-
 def save_seed_json(seed_channels, bump_params, growth_params, path):
     data = {
         "seed_size": SEED_SIZE,
@@ -213,33 +169,24 @@ def save_seed_json(seed_channels, bump_params, growth_params, path):
 # Creature generation
 # ---------------------------------------------------------------------------
 
-def generate_creature(name: str, config: dict[str, Any]) -> None:
-    print(f"\n=== {name} ===")
+def generate_creature(name: str, config: dict[str, Any], grid_size: int) -> None:
+    print(f"\n=== {name} @ {grid_size}x{grid_size} ===")
     num_kernels = config["num_kernels"]
 
     kernels_fft = generate_kernels_fft(
-        GRID_512, num_kernels, config["global_r"],
+        grid_size, num_kernels, config["global_r"],
         np.array(config["radii"]), np.array(config["a"]),
         np.array(config["w"]), np.array(config["b"]),
         config.get("direction"), config.get("direction_strength"),
     )
-    print(f"  FFT kernels: {num_kernels} x {GRID_512}x{GRID_512} complex64")
+    print(f"  FFT kernels: {num_kernels} x {grid_size}x{grid_size} complex64")
 
-    kernels_spatial = generate_kernels_spatial(
-        GRID_256, num_kernels, config["global_r"],
-        np.array(config["radii"]), np.array(config["a"]),
-        np.array(config["w"]), np.array(config["b"]),
-        config.get("direction"), config.get("direction_strength"),
-    )
-    print(f"  Spatial kernels: {num_kernels} x {GRID_256}x{GRID_256} float32")
-
-    seed_channels = generate_seed_channels(SEED_SIZE, NUM_CHANNELS, config["seed_params"])
-    print(f"  Seed: {NUM_CHANNELS} channels x {SEED_SIZE}x{SEED_SIZE} f64")
+    seed_channels = generate_seed_channels(grid_size, NUM_CHANNELS, config["seed_params"])
+    print(f"  Seed: {NUM_CHANNELS} channels x {grid_size}x{grid_size} f64")
 
     os.makedirs("kernels", exist_ok=True)
     os.makedirs("seed", exist_ok=True)
-    save_kernels_fft_bin(kernels_fft, f"kernels/{name}_512.bin")
-    save_kernels_spatial_bin(kernels_spatial, f"kernels/{name}_256.bin")
+    save_kernels_fft_bin(kernels_fft, f"kernels/{name}_{grid_size}.bin")
     bump_params = {
         "num_kernels": num_kernels,
         "global_r": config["global_r"],
@@ -257,11 +204,12 @@ def generate_creature(name: str, config: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate random Flow Lenia creatures")
-    parser.add_argument("--num-creatures", type=int, required=True,
-                        help="Number of random creatures to generate")
-    parser.add_argument("--num-kernels", type=int, default=5,
-                        help="Number of kernels per creature (default: 5)")
+    parser = argparse.ArgumentParser(description="Generate a single big Flow Lenia creature")
+    parser.add_argument("--grid-size", type=int, default=512,
+                        choices=[64, 128, 256, 512, 1024],
+                        help="Grid size (default: 512)")
+    parser.add_argument("--num-kernels", type=int, default=10,
+                        help="Number of kernels (default: 10)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
     args = parser.parse_args()
@@ -270,10 +218,9 @@ def main() -> None:
         random.seed(args.seed)
         np.random.seed(args.seed)
 
-    for i in range(args.num_creatures):
-        name = f"random_{i:04d}"
-        config = sample_creature_config(args.num_kernels)
-        generate_creature(name, config)
+    name = "big_creature"
+    config = sample_creature_config(args.num_kernels)
+    generate_creature(name, config, args.grid_size)
 
 
 if __name__ == "__main__":
