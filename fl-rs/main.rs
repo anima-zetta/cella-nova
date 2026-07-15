@@ -1,18 +1,57 @@
 mod orchestrator;
 mod wfft;
 
+use clap::Parser;
 use orchestrator::GpuFlowLenia;
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use wfft::WgpuContext;
-use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::WindowBuilder;
 
-const GRID_SIZE: usize = 512;
-const CELL_SIZE: usize = 64;
-const CELLS_PER_ROW: usize = GRID_SIZE / CELL_SIZE; // 8
+// ---------------------------------------------------------------------------
+// CLI arguments
+// ---------------------------------------------------------------------------
+
+#[derive(Parser)]
+#[command(name = "fl-rs", about = "Flow Lenia GPU simulation")]
+struct Cli {
+    /// Grid size (must be power of two, e.g. 64, 128, 256, 512)
+    #[arg(long, default_value = "512")]
+    grid_size: usize,
+
+    /// Cell size for creature placement grid (default: grid_size / 8)
+    #[arg(long, default_value_t = 0)]
+    cell_size: usize,
+
+    /// Simulation time step
+    #[arg(long, default_value_t = 0.2)]
+    dt: f32,
+
+    /// Reintegration stencil radius
+    #[arg(long, default_value_t = 5)]
+    dd: i32,
+
+    /// Reintegration sigma
+    #[arg(long, default_value_t = 0.65)]
+    sigma: f32,
+
+    /// Path to trained kernel FFT file (optional)
+    #[arg(long)]
+    load_kernels: Option<String>,
+
+    /// Video duration in seconds
+    #[arg(long, default_value_t = 60)]
+    seconds: u32,
+
+    /// Video frame rate
+    #[arg(long, default_value_t = 60)]
+    fps: u32,
+
+    /// Output directory for video
+    #[arg(long, default_value = "videos")]
+    output: String,
+}
 
 // ---------------------------------------------------------------------------
 // Creature config (subset of the JSON)
@@ -97,17 +136,13 @@ fn load_kernels_fft(
 }
 
 // ---------------------------------------------------------------------------
-// Render shaders
+// Common setup
 // ---------------------------------------------------------------------------
 
-const RENDER_SHADER: &str = include_str!("shaders/render.wgsl");
+fn setup_simulation(cli: &Cli) -> (Arc<WgpuContext>, GpuFlowLenia, usize) {
+    let grid_size = cli.grid_size;
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
-fn main() {
-    // --- Discover creatures ---
+    // Discover creatures
     let creature_names = discover_creatures();
     let num_creatures = creature_names.len();
     assert!(
@@ -122,8 +157,17 @@ fn main() {
         .map(|name| load_creature_config(name))
         .collect();
 
+    // Cell size defaults to seed size (so one creature fits in one cell)
+    let seed_size = configs[0].seed_size;
+    let cell_size = if cli.cell_size == 0 {
+        seed_size
+    } else {
+        cli.cell_size
+    };
+    let cells_per_row = grid_size / cell_size;
+
     // Compute totals
-    let num_channels: usize = configs[0].num_channels; // all creatures have the same
+    let num_channels: usize = configs[0].num_channels;
     let num_kernels: usize = configs.iter().map(|c| c.bump_params.num_kernels).sum();
 
     // Build flat arrays
@@ -153,25 +197,11 @@ fn main() {
         num_channels, num_kernels, num_creatures
     );
 
-    // --- Interactive mode ---
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Flow Lenia: GPU-Accelerated Mass-Conserving Life")
-        .with_inner_size(winit::dpi::LogicalSize::new(
-            GRID_SIZE as f64,
-            GRID_SIZE as f64,
-        ))
-        .with_resizable(false)
-        .build(&event_loop)
-        .unwrap();
-
-    // --- wgpu setup ---
+    // wgpu setup (headless)
     let instance = wgpu::Instance::default();
-    let surface = unsafe { instance.create_surface(&window) }.unwrap();
-
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: Some(&surface),
+        compatible_surface: None,
         force_fallback_adapter: false,
     }))
     .expect("No suitable GPU adapter found!");
@@ -186,107 +216,10 @@ fn main() {
     ))
     .expect("Failed to request GPU device!");
 
-    let window_size = window.inner_size();
-    let mut surface_config = surface
-        .get_default_config(&adapter, window_size.width, window_size.height)
-        .unwrap();
-    surface_config.present_mode = wgpu::PresentMode::AutoVsync;
-    surface.configure(&device, &surface_config);
-
-    // --- Render params ---
-    let render_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("render params"),
-        size: 12,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let mut data = Vec::with_capacity(12);
-    data.extend_from_slice(&(GRID_SIZE as u32).to_le_bytes());
-    data.extend_from_slice(&(surface_config.width as f32).to_le_bytes());
-    data.extend_from_slice(&(surface_config.height as f32).to_le_bytes());
-    queue.write_buffer(&render_params_buf, 0, &data);
-
     let context = Arc::new(WgpuContext::from_device(device, queue));
 
-    // --- Render pipeline ---
-    let render_shader = context
-        .device
-        .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("render shader"),
-            source: wgpu::ShaderSource::Wgsl(RENDER_SHADER.into()),
-        });
-
-    let render_bgl = context
-        .device
-        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("render bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-    let render_pl = context
-        .device
-        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("render pl"),
-            bind_group_layouts: &[&render_bgl],
-            push_constant_ranges: &[],
-        });
-
-    let render_pipeline = context
-        .device
-        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("render pipeline"),
-            layout: Some(&render_pl),
-            vertex: wgpu::VertexState {
-                module: &render_shader,
-                entry_point: "vs_main",
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &render_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
-
-    // --- Flow Lenia setup ---
-    let shape = GRID_SIZE.next_power_of_two();
-
-    let dt: f32 = 0.2;
-    let dd: i32 = 5;
-    let sigma: f32 = 0.65;
+    // Flow Lenia setup
+    let shape = grid_size.next_power_of_two();
 
     let game = GpuFlowLenia::new(
         Arc::clone(&context),
@@ -298,28 +231,26 @@ fn main() {
         &all_kernel_m,
         &all_kernel_s,
         &all_kernel_h,
-        dt,
-        dd,
-        sigma,
+        cli.dt,
+        cli.dd,
+        cli.sigma,
     );
 
-    // --- Upload seeds: place each creature in its 8x8 cell ---
-    // Accumulate all creatures into a single buffer per channel, then upload once.
-    let seed_size = configs[0].seed_size; // 64
+    // Upload seeds
     let mut channel_buffers: Vec<Vec<f64>> = (0..num_channels)
-        .map(|_| vec![0.0f64; GRID_SIZE * GRID_SIZE])
+        .map(|_| vec![0.0f64; grid_size * grid_size])
         .collect();
     for (ci, config) in configs.iter().enumerate() {
-        let row = ci / CELLS_PER_ROW;
-        let col = ci % CELLS_PER_ROW;
-        let offset_x = col * CELL_SIZE;
-        let offset_y = row * CELL_SIZE;
+        let row = ci / cells_per_row;
+        let col = ci % cells_per_row;
+        let offset_x = col * cell_size;
+        let offset_y = row * cell_size;
 
         for c in 0..config.num_channels {
             let src = &config.seed_channels[c];
             for iy in 0..seed_size {
                 for ix in 0..seed_size {
-                    let dst_idx = (offset_y + iy) * GRID_SIZE + (offset_x + ix);
+                    let dst_idx = (offset_y + iy) * grid_size + (offset_x + ix);
                     let src_idx = iy * seed_size + ix;
                     channel_buffers[c][dst_idx] = src[src_idx];
                 }
@@ -330,7 +261,7 @@ fn main() {
         game.upload_channel(buf, c);
     }
 
-    // --- Load and upload kernels ---
+    // Load and upload kernels
     let mut kernel_offset = 0;
     for (ci, config) in configs.iter().enumerate() {
         let name = &creature_names[ci];
@@ -343,116 +274,130 @@ fn main() {
         kernel_offset += nk;
     }
 
-    // --- Render bind group ---
-    let render_bg = context
-        .device
-        .create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("render bg"),
-            layout: &render_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: game.channel_buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: render_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-    let mut last_fps_time = Instant::now();
-    let mut frame_count: u32 = 0;
-    let mut last_compute_ms: f64 = 0.0;
-
     println!("Flow Lenia: GPU-Accelerated Mass-Conserving CA");
     println!(
         "{} channels, {} kernels, {}x{} grid, {} creatures in {}x{} grid",
         num_channels,
         num_kernels,
-        GRID_SIZE,
-        GRID_SIZE,
+        grid_size,
+        grid_size,
         num_creatures,
-        CELLS_PER_ROW,
-        CELLS_PER_ROW
+        cells_per_row,
+        cells_per_row
     );
-    println!("Reintegration tracking: dd={}, sigma={}", dd, sigma);
+    println!("Reintegration tracking: dd={}, sigma={}", cli.dd, cli.sigma);
 
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
+    (context, game, grid_size)
+}
 
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => *control_flow = ControlFlow::Exit,
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
-            Event::MainEventsCleared => {
-                window.request_redraw();
-            }
+fn main() {
+    let cli = Cli::parse();
+    run_video(cli);
+}
 
-            Event::RedrawRequested(_) => {
-                frame_count += 1;
-                let now = Instant::now();
-                let elapsed = now.duration_since(last_fps_time).as_secs_f64();
-                if elapsed >= 1.0 {
-                    let fps = frame_count as f64 / elapsed;
-                    window.set_title(&format!(
-                        "Flow Lenia GPU -- {:.0} FPS | compute {:.1}ms ({}x{} grid, {}ch, {}kernels, {} creatures)",
-                        fps, last_compute_ms, GRID_SIZE, GRID_SIZE, num_channels, num_kernels, num_creatures
-                    ));
-                    last_fps_time = now;
-                    frame_count = 0;
-                }
+// ---------------------------------------------------------------------------
+// Video mode: headless frame generation + ffmpeg encoding
+// ---------------------------------------------------------------------------
 
-                // Get the surface texture first (may wait for vsync)
-                let frame = surface.get_current_texture().unwrap();
-                let view = frame
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
+fn run_video(cli: Cli) {
+    let (_context, game, grid_size) = setup_simulation(&cli);
 
-                // Single encoder: compute + render in one submit
-                let mut encoder =
-                    context
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("frame encoder"),
-                        });
+    let total_frames = (cli.seconds as u64) * (cli.fps as u64);
+    let output_path = format!("{}/output.mp4", cli.output);
+    let output_dir = PathBuf::from(&cli.output);
 
-                // Compute pass
-                let compute_start = Instant::now();
-                game.iterate_with_encoder(&mut encoder);
-                last_compute_ms = compute_start.elapsed().as_secs_f64() * 1000.0;
+    std::fs::create_dir_all(&output_dir).expect("Failed to create output directory");
 
-                // Render pass
-                {
-                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("render pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color {
-                                    r: 0.01,
-                                    g: 0.01,
-                                    b: 0.02,
-                                    a: 1.0,
-                                }),
-                                store: true,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                    });
-                    rpass.set_pipeline(&render_pipeline);
-                    rpass.set_bind_group(0, &render_bg, &[]);
-                    rpass.draw(0..3, 0..1);
-                }
+    println!(
+        "Generating {} frames at {} FPS ({} seconds)",
+        total_frames, cli.fps, cli.seconds
+    );
+    println!("Output: {}", output_path);
 
-                context.queue.submit(Some(encoder.finish()));
-                frame.present();
-            }
+    let shape = grid_size;
 
-            _ => {}
+    // Spawn ffmpeg and pipe raw grayscale frames to its stdin
+    let mut ffmpeg = std::process::Command::new("ffmpeg")
+        .args(&[
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "rgb24",
+            "-video_size",
+            &format!("{}x{}", shape, shape),
+            "-framerate",
+            &cli.fps.to_string(),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            &output_path,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn ffmpeg. Is ffmpeg installed?");
+
+    let mut stdin = ffmpeg.stdin.take().expect("Failed to open ffmpeg stdin");
+
+    for step in 0..total_frames {
+        game.iterate();
+
+        if step % cli.fps as u64 == 0 {
+            let elapsed_secs = step / cli.fps as u64;
+            print!(
+                "\rFrame {}/{} ({}s)...",
+                step + 1,
+                total_frames,
+                elapsed_secs
+            );
+            use std::io::Write;
+            std::io::stdout().flush().unwrap();
         }
-    });
+
+        let data = game.download_all_channels();
+
+        // Map channels to RGB (matching the render shader):
+        //   c0 -> R, c1 -> G, c2 -> B
+        //   color = clamp(channel * 1.5, 0, 1), then gamma = sqrt(color)
+        // No per-frame normalization -- fixed mapping prevents flickering.
+        let mut pixels = vec![0u8; shape * shape * 3];
+        for i in 0..shape {
+            for j in 0..shape {
+                let idx = i * shape + j;
+                let c0 = data[0 * shape * shape + idx];
+                let c1 = data[1 * shape * shape + idx];
+                let c2 = data[2 * shape * shape + idx];
+                let r = (c0 * 1.5).clamp(0.0, 1.0).sqrt();
+                let g = (c1 * 1.5).clamp(0.0, 1.0).sqrt();
+                let b = (c2 * 1.5).clamp(0.0, 1.0).sqrt();
+                let p = idx * 3;
+                pixels[p] = (r * 255.0) as u8;
+                pixels[p + 1] = (g * 255.0) as u8;
+                pixels[p + 2] = (b * 255.0) as u8;
+            }
+        }
+
+        // Write raw RGB frame to ffmpeg stdin
+        use std::io::Write;
+        stdin
+            .write_all(&pixels)
+            .expect("Failed to write frame to ffmpeg");
+    }
+
+    println!("\nClosing ffmpeg...");
+    drop(stdin);
+    let status = ffmpeg.wait().expect("Failed to wait for ffmpeg");
+
+    if status.success() {
+        println!("Video saved to: {}", output_path);
+    } else {
+        eprintln!("ffmpeg encoding failed (exit code: {:?})", status.code());
+    }
 }

@@ -571,7 +571,6 @@ impl ConvolutionPhase {
 
             let copy_bgs = &self.copy_bgs_cache[gi];
             let cmul_bgs = &self.cmul_bgs_cache[gi];
-            let fused_bgs = &self.fused_cmul_ifft_bgs_cache[gi];
             let saved_bgs = &self.cmul_from_saved_bgs_cache[gi];
 
             // Step 1: Copy channel → conv (first kernel's source channel)

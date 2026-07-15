@@ -7,3 +7,4 @@ seed/**
 train/trained_**
 .poolside/
 pngs/**
+videos/**
