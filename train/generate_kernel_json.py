@@ -152,9 +152,9 @@ def save_kernels_fft_bin(kernels: list[npt.NDArray[np.complex64]], path: str) ->
     print(f"  Saved {path} ({os.path.getsize(path) / 1024 / 1024:.1f} MB)")
 
 
-def save_seed_json(seed_channels, bump_params, growth_params, path):
+def save_seed_json(seed_channels, bump_params, growth_params, seed_size, path):
     data = {
-        "seed_size": SEED_SIZE,
+        "seed_size": seed_size,
         "num_channels": NUM_CHANNELS,
         "seed_channels": seed_channels,
         "bump_params": bump_params,
@@ -196,7 +196,7 @@ def generate_creature(name: str, config: dict[str, Any], grid_size: int) -> None
     growth_params = {
         "m": config["growth_m"], "s": config["growth_s"], "h": config["growth_h"],
     }
-    save_seed_json(seed_channels, bump_params, growth_params, f"seed/{name}.json")
+    save_seed_json(seed_channels, bump_params, growth_params, grid_size, f"seed/{name}.json")
 
 
 # ---------------------------------------------------------------------------
