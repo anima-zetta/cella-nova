@@ -39,7 +39,7 @@ def get_reference_config() -> dict[str, Any]:
     # Growth functions (per kernel)
     growth_m = [0.1, 0.15, 0.12]
     growth_s = [0.05, 0.08, 0.065]
-    growth_h = [0.5, 0.8, 0.65]
+    growth_h = [0.5, 1.0, 0.9]
 
     # Kernel flow params (per kernel, 3 channels each)
     a = [[0.0, 0.5, 0.0], [0.0, 0.4, 0.0], [0.0, 0.45, 0.0]]
@@ -50,11 +50,11 @@ def get_reference_config() -> dict[str, Any]:
     direction = None
     direction_strength = None
 
-    # Seed: 3-channel Gaussian, 50% grid coverage, full brightness
+    # Seed: 3-channel flat-top blob, 50% grid coverage, sharp edges
     seed_params = [
-        {"sigma": 0.25, "offset_x": 0.0,  "offset_y": 0.0,  "amplitude": 0.5},
-        {"sigma": 0.25, "offset_x": 0.04, "offset_y": 0.0,  "amplitude": 0.5},
-        {"sigma": 0.25, "offset_x": 0.0,  "offset_y": 0.04, "amplitude": 0.5},
+        {"radius": 0.5, "offset_x": 0.0,  "offset_y": 0.0,  "amplitude": 0.4},
+        {"radius": 0.5, "offset_x": 0.04, "offset_y": 0.0,  "amplitude": 0.4},
+        {"radius": 0.5, "offset_x": 0.0,  "offset_y": 0.04, "amplitude": 0.4},
     ]
 
     return {
@@ -128,7 +128,11 @@ def generate_seed_channels(
             for c, ch in enumerate(channel_configs):
                 dx = gx - ch.get("offset_x", 0.0)
                 dy = gy - ch.get("offset_y", 0.0)
-                val = math.exp(-(dx*dx + dy*dy) / (2.0 * ch["sigma"] * ch["sigma"]))
+                d = math.sqrt(dx*dx + dy*dy)
+                radius = ch.get("radius", 0.5)
+                edge_width = ch.get("edge_width", 0.1)
+                # Smooth step: flat top inside radius, tanh transition at edge
+                val = 0.5 * (1.0 - math.tanh((d - radius) / edge_width))
                 amp = ch.get("amplitude", 1.0)
                 channels[c][idx] = max(0.0, min(1.0, val * amp))
     return channels

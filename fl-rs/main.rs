@@ -29,7 +29,7 @@ struct Cli {
     dd: i32,
 
     /// Reintegration sigma
-    #[arg(long, default_value_t = 0.65)]
+    #[arg(long, default_value_t = 0.6)]
     sigma: f32,
 
     /// Path to trained kernel FFT file (optional)
