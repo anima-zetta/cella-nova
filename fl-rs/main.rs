@@ -227,15 +227,16 @@ fn setup_simulation(cli: &Cli) -> (Arc<WgpuContext>, GpuFlowLenia, usize) {
         all_kernel_h.extend(&config.growth_params.h);
     }
 
-    // Build C0/C1 mapping: simple round-robin across channels
+    // Build C0/C1 mapping: cyclic channel relationship.
+    // Channel 0 -> Channel 1, Channel 1 -> Channel 2, Channel 2 -> Channel 0
     let c0: Vec<u32> = (0..num_kernels as u32)
         .map(|k| k % num_channels as u32)
         .collect();
     let c1: Vec<Vec<u32>> = (0..num_channels)
         .map(|c| {
-            (0..num_kernels as u32)
-                .filter(|&k| k % num_channels as u32 == c as u32)
-                .collect()
+            // Channel c receives from kernels whose source is (c + 2) % 3
+            let src = ((c as u32) + 2) % 3;
+            (0..num_kernels as u32).filter(|&k| k % 3 == src).collect()
         })
         .collect();
 

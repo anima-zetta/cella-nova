@@ -187,7 +187,7 @@ fn main() {
     let num_steps: usize = 50;
 
     let c0: Vec<u32> = vec![0, 1, 2];
-    let c1: Vec<Vec<u32>> = vec![vec![0], vec![1], vec![2]];
+    let c1: Vec<Vec<u32>> = vec![vec![2], vec![0], vec![1]];
 
     let dt: f32 = 0.2;
     let dd: i32 = 5;

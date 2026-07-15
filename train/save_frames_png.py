@@ -34,7 +34,7 @@ params = Params(
 )
 
 c0 = [0, 1, 2]
-c1 = [[0], [1], [2]]
+c1 = [[2], [0], [1]]
 
 config = Config(
     SX=SX, SY=SY, nb_k=nb_k, C=C,
