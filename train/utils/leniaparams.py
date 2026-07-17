@@ -1,5 +1,9 @@
 import torch
-import math, os
+import math
+import os
+import pickle
+import hashlib
+from typing import Dict
 
 def params_to_words(state_dict: Dict[str, torch.Tensor], num_words: int = 2) -> str:
     """
@@ -50,6 +54,7 @@ class BatchParams():
         It has a dictionary of parameters which are torch tensors (or int) of various
         sizes, with a batch dimension. Specific keys are model specific.
     """
+    k_size: int
 
     def __init__(self, param_dict=None, from_file=None, batch_size=None, device='cpu'):
         """
@@ -72,6 +77,7 @@ class BatchParams():
             param_dict = torch.load(from_file, map_location=device)
 
         self.param_dict = {}
+        assert param_dict is not None
         for key in param_dict.keys():
             if(isinstance(param_dict[key], torch.Tensor)):
                 if(self.batch_size is None):
@@ -86,7 +92,7 @@ class BatchParams():
         self.to(device)
 
     def __setattr__(self, name, value):
-        if(not name in {'param_dict', 'batch_size', 'device'}):
+        if name not in {'param_dict', 'batch_size', 'device'}:
             if(isinstance(value, torch.Tensor)):
                 assert value.shape[0] == self.batch_size, f'Attempted to add element of incorrect batch size: got {value.shape[0]} expected {self.batch_size}'
             self.param_dict[name] = value
@@ -124,6 +130,7 @@ class BatchParams():
 
         name = params_to_words(self.param_dict)
         batch_size = self.batch_size
+        assert batch_size is not None
 
         params_list = [self[i] for i in range(batch_size)]
 

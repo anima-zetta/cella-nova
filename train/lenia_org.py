@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+from typing import cast
 from utils.dev_module import DevModule
 from utils.noise_gen import perlin, perlin_fractal
 from utils.leniaparams import LeniaParams
@@ -55,8 +56,8 @@ class MCLenia(DevModule):
         else:
             self.params = params
 
-        self.k_size = self.params['k_size'] # kernel sizes (same for all) ODD for conv2d, even for fft
-        self.register_buffer('state',torch.rand((self.batch,self.C,self.h,self.w)))
+        self.k_size = cast(int, self.params['k_size']) # kernel sizes (same for all) ODD for conv2d, even for fft
+        self.register_buffer('state',torch.rand((self.batch,self.C,self.h,self.w), dtype=torch.float32))
 
         if(state_init is None):
             self.set_init_fractal() # Fractal perlin init
@@ -66,13 +67,13 @@ class MCLenia(DevModule):
         self.dt = dt
 
         # Buffer for all parameters since we do not require_grad for them :
-        self.register_buffer('mu', self.params['mu']) # mean of the growth functions (B,C,C)
-        self.register_buffer('sigma', self.params['sigma']) # standard deviation of the growths functions (B,C,C)
-        self.register_buffer('beta',self.params['beta']) # max of the kernel rings (B,C,C, # of rings)
-        self.register_buffer('mu_k',self.params['mu_k'])# mean of the kernel gaussians (B,C,C, # of rings)
-        self.register_buffer('sigma_k',self.params['sigma_k'])# standard deviation of the kernel gaussians (B,C,C, # of rings)
-        self.register_buffer('weights',self.params['weights']) # raw weigths for the growth weighted sum (B,C,C)
-        self.register_buffer('kernel',torch.zeros((self.k_size,self.k_size)))
+        self.register_buffer('mu', cast(torch.Tensor, self.params['mu']))
+        self.register_buffer('sigma', cast(torch.Tensor, self.params['sigma']))
+        self.register_buffer('beta', cast(torch.Tensor, self.params['beta']))
+        self.register_buffer('mu_k', cast(torch.Tensor, self.params['mu_k']))
+        self.register_buffer('sigma_k', cast(torch.Tensor, self.params['sigma_k']))
+        self.register_buffer('weights', cast(torch.Tensor, self.params['weights']))
+        self.register_buffer('kernel',torch.zeros((self.k_size,self.k_size), dtype=torch.float32))
 
         self.update_params(self.params)
 
@@ -132,8 +133,9 @@ class MCLenia(DevModule):
             Sets the initial state of the automaton using fractal perlin noise.
             Max wavelength is k_size*1.5, chosen a bit randomly
         """
-        self.state = perlin_fractal((self.batch,self.h,self.w),int(self.k_size*1.5),
+        noise = perlin_fractal((self.batch,self.h,self.w),int(self.k_size*1.5),
                                     device=self.device,black_prop=0.25,num_channels=self.C,persistence=0.4)
+        self.state = cast(torch.Tensor, noise)
 
     def set_init_perlin(self,wavelength=None):
         """
@@ -142,18 +144,21 @@ class MCLenia(DevModule):
         """
         if(not wavelength):
             wavelength = self.k_size
-        self.state = perlin((self.batch,self.h,self.w),[wavelength]*2,
+        noise = perlin((self.batch,self.h,self.w),(self.k_size,self.k_size),
                             device=self.device,num_channels=self.C,black_prop=0.25)
+        self.state = cast(torch.Tensor, noise)
 
     def set_init_circle(self,fractal=False, radius=None):
         if(radius is None):
             radius = self.k_size*3
         if(fractal):
-            self.state = perlin_fractal((self.batch,self.h,self.w),int(self.k_size*1.5),
+            noise = perlin_fractal((self.batch,self.h,self.w),int(self.k_size*1.5),
                                     device=self.device,black_prop=0.25,num_channels=self.C,persistence=0.4)
+            self.state = cast(torch.Tensor, noise)
         else:
-            self.state = perlin((self.batch,self.h,self.w),[self.k_size]*2,
+            noise = perlin((self.batch,self.h,self.w),(self.k_size,self.k_size),
                             device=self.device,num_channels=self.C,black_prop=0.25)
+            self.state = cast(torch.Tensor, noise)
         X,Y = torch.meshgrid(torch.linspace(-self.h//2,self.h//2,self.h,device=self.device),torch.linspace(-self.w//2,self.w//2,self.w,device=self.device))
         R = torch.sqrt(X**2+Y**2)
         self.state = torch.where(R<radius,self.state,torch.zeros_like(self.state,device=self.device))
@@ -255,7 +260,7 @@ class MCLenia(DevModule):
             Compute convolution using fft
         """
         state = torch.fft.fft2(state) # (B,C,H,W) fourier transform
-        state = state[:,:,None] # (B,1,C,H,W)
+        state = state[:,None] # (B,1,C,H,W)
         state = state*self.fft_kernel # (B,C,C,H,W), convoluted
         state = torch.fft.ifft2(state) # (B,C,C,H,W), back to spatial domain
 

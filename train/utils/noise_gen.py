@@ -1,5 +1,6 @@
 import torch
-import numpy as np, math
+import numpy as np
+import math
 from pyperlin import FractalPerlin2D
 
 def perlin(shape:tuple, wavelengths:tuple, num_channels=3, black_prop:float=0.3,device='cpu'):
@@ -34,7 +35,7 @@ def perlin_fractal(shape:tuple, max_wavelength:int, persistence=0.5,num_channels
     """
     max_num = min(6,int(math.log2(max_wavelength)))
     normalization = float(sum([persistence**(i+1) for i in range(max_num)]))
-    return 1./normalization*sum([persistence**(i+1)*perlin(shape,[int(2**(-i)*max_wavelength)]*2,black_prop=black_prop,num_channels=num_channels,device=device) for i in range(max_num)])
+    return 1./normalization*sum([persistence**(i+1)*perlin(shape,(int(2**(-i)*max_wavelength),int(2**(-i)*max_wavelength)),black_prop=black_prop,num_channels=num_channels,device=device) for i in range(max_num)])
 
 if __name__=='__main__':
     from time import time
