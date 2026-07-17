@@ -1,21 +1,20 @@
-//! GPU-resident Flow Lenia simulation.
+//! GPU-resident MaceLenia (Multi-channel Lenia) simulation.
 //!
-//! Extends standard Lenia with:
-//! - Multi-kernel, multi-channel architecture
-//! - Flow field computation via Sobel gradients
-//! - Reintegration tracking (semi-Lagrangian advection)
-//!
-//! Reference: "Flow Lenia: Mass conservation for the simulation of
-//! continuous cellular automata" (https://arxiv.org/abs/2212.07906)
+//! Implements the MaceLenia algorithm from `train/lenia_org.py`:
+//! - Multi-channel, multi-kernel architecture with FFT-based convolution
+//! - Ring-based kernels (pre-FFT'd on CPU)
+//! - Bump growth function: G(u) = 2*exp(-((u-mu)/sigma)^2/2) - 1
+//! - Weighted sum over input channels per output channel
+//! - Euler step with clamping to [0, 1]
 //!
 //! All computation runs on the GPU with zero CPU readback between frames.
 
 mod convolution;
-mod phase2;
+mod growth;
 
 use crate::wfft::WgpuContext;
 use convolution::ConvolutionPhase;
-use phase2::{AdvectionPhase, AggregationPhase, GradientFlowPhase, ParamAdvectionPhase};
+use growth::GrowthPhase;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -37,15 +36,11 @@ fn select_compute_shader(grid_size: usize) -> &'static str {
     }
 }
 
-/// Stride between per-kernel growth param slots in the GPU buffer.
-/// Must be at least `min_storage_buffer_offset_alignment` (256 on most devices).
-const GP_STRIDE: u64 = 256;
-
 // ===========================================================================
-// GpuFlowLenia — top-level simulation orchestrator
+// GpuMaceLenia — top-level simulation orchestrator
 // ===========================================================================
 
-pub struct GpuFlowLenia {
+pub struct GpuMaceLenia {
     context: Arc<WgpuContext>,
     shape: Vec<usize>,
     total_elements: usize,
@@ -53,33 +48,23 @@ pub struct GpuFlowLenia {
     num_kernels: usize,
 
     // Channel mapping
-    c0: Vec<u32>,
+    c0: Vec<u32>, // input channel for each kernel
+    c1: Vec<u32>, // output channel for each kernel
 
-    // --- Packed GPU buffers (shared across phases) ---
-    /// All channels packed: [X*Y*C] f32
+    // --- Packed GPU buffers ---
+    /// All channels packed: [C * H * W] f32
     channel_buffer: wgpu::Buffer,
-    /// Output of reintegration: [X*Y*C] f32
+    /// Output of Euler step: [C * H * W] f32
     new_channel_buffer: wgpu::Buffer,
-    /// All kernels packed: [X*Y*k] vec2<f32>
+    /// All kernels FFT'd: [K * H * W] vec2<f32>
     kernel_buffer: wgpu::Buffer,
-    /// Parameter field: [X*Y*K] f32
-    param_buffer: wgpu::Buffer,
-    /// Output of parameter advection: [X*Y*K] f32
-    new_param_buffer: wgpu::Buffer,
 
     // --- Phase sub-structs ---
     convolution: ConvolutionPhase,
-    aggregation: AggregationPhase,
-    gradient_flow: GradientFlowPhase,
-    advection: AdvectionPhase,
-    param_advection: ParamAdvectionPhase,
-
-    // Total mass buffer (sum of all channels), shared between gradient_flow and param_advection
-    #[allow(dead_code)]
-    sum_a_buffer: wgpu::Buffer,
+    growth: GrowthPhase,
 }
 
-impl GpuFlowLenia {
+impl GpuMaceLenia {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: Arc<WgpuContext>,
@@ -87,21 +72,17 @@ impl GpuFlowLenia {
         num_channels: usize,
         num_kernels: usize,
         c0: &[u32],
-        c1: &[Vec<u32>],
-        kernel_m: &[f32],
-        kernel_s: &[f32],
-        kernel_h: &[f32],
+        c1: &[u32],
+        mu: &[f32],
+        sigma: &[f32],
+        weights: &[f32],
         dt: f32,
-        dd: i32,
-        sigma: f32,
     ) -> Self {
         let device = &context.device;
         let queue = &context.queue;
 
-        assert_eq!(shape.len(), 2, "Flow Lenia requires 2D grids");
+        assert_eq!(shape.len(), 2, "MaceLenia requires 2D grids");
         let total_elements: usize = shape.iter().product();
-        let buf_size = (total_elements * 4) as u64;
-        let conv_buf_size = (total_elements * 8) as u64;
 
         // --- Create all shared GPU buffers ---
         let make_storage = |label: &str, size: u64| -> wgpu::Buffer {
@@ -116,40 +97,18 @@ impl GpuFlowLenia {
         };
 
         let ch_size = (total_elements * num_channels * 4) as u64;
-        let channel_buffer = make_storage("fl::channel", ch_size);
-        let new_channel_buffer = make_storage("fl::new_channel", ch_size);
-        let conv_buffer = make_storage("fl::conv", conv_buf_size);
-        let conv_saved_buffer = make_storage("fl::conv_saved", conv_buf_size);
+        let channel_buffer = make_storage("ml::channel", ch_size);
+        let new_channel_buffer = make_storage("ml::new_channel", ch_size);
 
         let k_size = (total_elements * num_kernels * 8) as u64;
-        let kernel_buffer = make_storage("fl::kernel", k_size);
+        let kernel_buffer = make_storage("ml::kernel", k_size);
 
-        let u_size = (total_elements * num_kernels * 4) as u64;
-        let u_buffer = make_storage("fl::u", u_size);
-
-        let uc_size = (total_elements * num_channels * 4) as u64;
-        let u_channel_buffer = make_storage("fl::u_channel", uc_size);
-        let nabla_u_x_buffer = make_storage("fl::nabla_u_x", uc_size);
-        let nabla_u_y_buffer = make_storage("fl::nabla_u_y", uc_size);
-
-        let nabla_a_x_buffer = make_storage("fl::nabla_a_x", buf_size);
-        let nabla_a_y_buffer = make_storage("fl::nabla_a_y", buf_size);
-        let sum_a_buffer = make_storage("fl::sum_a", buf_size);
-
-        let flow_x_buffer = make_storage("fl::flow_x", uc_size);
-        let flow_y_buffer = make_storage("fl::flow_y", uc_size);
-
-        // Parameter field buffers: [X*Y*K] f32
-        let param_size = (total_elements * num_kernels * 4) as u64;
-        let param_buffer = make_storage("fl::param", param_size);
-        let new_param_buffer = make_storage("fl::new_param", param_size);
-
-        // Initialize param buffer to 1.0 (no effect on growth initially)
-        let ones: Vec<f32> = vec![1.0f32; total_elements * num_kernels];
-        queue.write_buffer(&param_buffer, 0, bytemuck::cast_slice(&ones));
+        let conv_size = (total_elements * num_kernels * 8) as u64;
+        let conv_buffer = make_storage("ml::conv", conv_size);
 
         // --- Initialize phase sub-structs ---
         let compute_shader = select_compute_shader(shape[0]);
+
         let convolution = ConvolutionPhase::new(
             device,
             queue,
@@ -158,19 +117,13 @@ impl GpuFlowLenia {
             total_elements,
             num_kernels,
             num_channels,
-            kernel_m,
-            kernel_s,
-            kernel_h,
             c0,
-            conv_buffer, // move ownership
-            conv_saved_buffer,
+            conv_buffer,
             &channel_buffer,
             &kernel_buffer,
-            &u_buffer,
-            &param_buffer,
         );
 
-        let aggregation = AggregationPhase::new(
+        let growth = GrowthPhase::new(
             device,
             queue,
             compute_shader,
@@ -178,75 +131,28 @@ impl GpuFlowLenia {
             num_kernels,
             num_channels,
             c1,
-            &u_buffer,
-            &u_channel_buffer,
-        );
-
-        let gradient_flow = GradientFlowPhase::new(
-            device,
-            queue,
-            compute_shader,
-            shape,
-            num_channels,
-            &channel_buffer,
-            &u_channel_buffer,
-            &flow_x_buffer,
-            &flow_y_buffer,
-            nabla_u_x_buffer, // move ownership
-            nabla_u_y_buffer,
-            nabla_a_x_buffer,
-            nabla_a_y_buffer,
-            &sum_a_buffer,
-        );
-
-        let advection = AdvectionPhase::new(
-            device,
-            queue,
-            compute_shader,
-            shape,
-            num_channels,
-            num_kernels,
-            dd,
+            mu,
             sigma,
+            weights,
             dt,
+            &convolution.conv_buffer,
             &channel_buffer,
-            &flow_x_buffer,
-            &flow_y_buffer,
             &new_channel_buffer,
-            &param_buffer,
-            &new_param_buffer,
         );
 
-        let param_advection = ParamAdvectionPhase::new(
-            device,
-            compute_shader,
-            &channel_buffer,
-            &flow_x_buffer,
-            &flow_y_buffer,
-            &sum_a_buffer,
-            &param_buffer,
-            &new_param_buffer,
-            &advection.params_buffer,
-        );
-
-        GpuFlowLenia {
+        GpuMaceLenia {
             context,
             shape: shape.to_vec(),
             total_elements,
             num_channels,
             num_kernels,
             c0: c0.to_vec(),
+            c1: c1.to_vec(),
             channel_buffer,
             new_channel_buffer,
             kernel_buffer,
-            param_buffer,
-            new_param_buffer,
-            sum_a_buffer,
             convolution,
-            aggregation,
-            gradient_flow,
-            advection,
-            param_advection,
+            growth,
         }
     }
 
@@ -256,8 +162,7 @@ impl GpuFlowLenia {
         &self.channel_buffer
     }
 
-    /// Run N iterations (forward pass).
-    /// Uploads a pre-FFT'd kernel at the given index.
+    /// Upload a pre-FFT'd kernel at the given index.
     pub fn set_kernel(&self, kernel_fft: &[num_complex::Complex32], kernel_idx: usize) {
         assert_eq!(kernel_fft.len(), self.total_elements);
         let offset = (kernel_idx * self.total_elements * 8) as u64;
@@ -267,7 +172,7 @@ impl GpuFlowLenia {
             .write_buffer(&self.kernel_buffer, offset, bytemuck::cast_slice(&data));
     }
 
-    /// Uploads channel data at the given index.
+    /// Upload channel data at the given index.
     pub fn upload_channel(&self, data: &[f64], channel: usize) {
         assert_eq!(data.len(), self.total_elements);
         let offset = (channel * self.total_elements * 4) as u64;
@@ -279,7 +184,6 @@ impl GpuFlowLenia {
         );
     }
 
-    #[allow(dead_code)]
     /// Run N iterations (forward pass).
     pub fn run_steps(&self, n: usize) {
         for _ in 0..n {
@@ -287,7 +191,6 @@ impl GpuFlowLenia {
         }
     }
 
-    #[allow(dead_code)]
     /// Download all channel data concatenated.
     pub fn download_all_channels(&self) -> Vec<f32> {
         let device = &self.context.device;
@@ -296,14 +199,14 @@ impl GpuFlowLenia {
         let total_bytes = (total_floats * 4) as u64;
 
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("fl::readback_all"),
+            label: Some("ml::readback_all"),
             size: total_bytes,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("fl::download_all"),
+            label: Some("ml::download_all"),
         });
         encoder.copy_buffer_to_buffer(&self.channel_buffer, 0, &readback, 0, total_bytes);
         queue.submit(Some(encoder.finish()));
@@ -318,30 +221,61 @@ impl GpuFlowLenia {
         result
     }
 
-    /// Download all channel data concatenated.
+    /// Download the conv buffer (for debugging).
+    /// Returns the real part of each complex element.
+    pub fn download_conv_buffer(&self) -> Vec<f32> {
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+        let total_complex = self.total_elements * self.num_kernels;
+        let total_bytes = (total_complex * 8) as u64;
+
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ml::readback_conv"),
+            size: total_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ml::download_conv"),
+        });
+        encoder.copy_buffer_to_buffer(&self.convolution.conv_buffer, 0, &readback, 0, total_bytes);
+        queue.submit(Some(encoder.finish()));
+
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
+        let view = slice.get_mapped_range();
+        // Extract real parts only
+        let raw: &[f32] = bytemuck::cast_slice(&view);
+        let mut result = Vec::with_capacity(total_complex);
+        for i in 0..total_complex {
+            result.push(raw[i * 2]);
+        }
+        drop(view);
+        readback.unmap();
+        result
+    }
+
     // =======================================================================
     // Main iteration
     // =======================================================================
 
-    /// Performs a single Flow Lenia iteration entirely on the GPU.
+    /// Performs a single MaceLenia iteration entirely on the GPU.
+    ///
+    /// Algorithm:
+    /// 1. For each input channel: FFT → complex multiply with each kernel → IFFT
+    /// 2. For each pixel: growth function → weighted sum → Euler step
     pub fn iterate(&self) {
         let device = &self.context.device;
         let queue = &self.context.queue;
         let total = self.total_elements as u32;
-        let wg = (total + 255) / 256;
-        let wg_c = ((total * self.num_channels as u32) + 255) / 256;
-        let wg_k = ((total * self.num_kernels as u32) + 255) / 256;
-
-        // ================================================================
-        // Single combined encoder: all phases in one submit.
-        // The GPU handles buffer dependencies between dispatches internally.
-        // ================================================================
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("fl::iterate"),
+            label: Some("ml::iterate"),
         });
 
-        // Phase 1: Per-kernel convolution + growth
+        // Phase 1: FFT convolution for all channels and kernels
         self.convolution.run(
             device,
             &mut encoder,
@@ -354,16 +288,10 @@ impl GpuFlowLenia {
             &self.shape,
         );
 
-        // Phase 2a: Channel aggregation (kernel growths → per-channel sums)
-        self.aggregation.run(&mut encoder, wg_c);
+        // Phase 2: Growth + weighted sum + Euler step
+        self.growth.run(&mut encoder, total);
 
-        // Phase 2b: Sobel gradients + flow field
-        self.gradient_flow.run(&mut encoder, wg, wg_c);
-
-        // Phase 2c: Semi-Lagrangian advection (density)
-        self.advection.run(&mut encoder, wg_c);
-
-        // Phase 3: Swap new → current for density
+        // Phase 3: Copy new_channel → channel
         encoder.copy_buffer_to_buffer(
             &self.new_channel_buffer,
             0,
@@ -380,10 +308,8 @@ impl GpuFlowLenia {
     pub fn iterate_with_encoder(&self, encoder: &mut wgpu::CommandEncoder) {
         let device = &self.context.device;
         let total = self.total_elements as u32;
-        let wg = (total + 255) / 256;
-        let wg_c = ((total * self.num_channels as u32) + 255) / 256;
 
-        // Phase 1: Per-kernel convolution + growth
+        // Phase 1: FFT convolution
         self.convolution.run(
             device,
             encoder,
@@ -396,16 +322,10 @@ impl GpuFlowLenia {
             &self.shape,
         );
 
-        // Phase 2a: Channel aggregation
-        self.aggregation.run(encoder, wg_c);
+        // Phase 2: Growth + weighted sum + Euler step
+        self.growth.run(encoder, total);
 
-        // Phase 2b: Sobel gradients + flow field
-        self.gradient_flow.run(encoder, wg, wg_c);
-
-        // Phase 2c: Semi-Lagrangian advection
-        self.advection.run(encoder, wg_c);
-
-        // Phase 3: Swap new -> current for density
+        // Phase 3: Copy new_channel → channel
         encoder.copy_buffer_to_buffer(
             &self.new_channel_buffer,
             0,
@@ -416,21 +336,17 @@ impl GpuFlowLenia {
     }
 
     /// Performs a single iteration with per-phase GPU timing.
-    /// Each phase uses a separate submit + device.poll() to measure time.
-    /// This adds overhead but gives a rough breakdown.
-    pub fn timed_iterate(&self) -> [f64; 6] {
+    pub fn timed_iterate(&self) -> [f64; 3] {
         let device = &self.context.device;
         let queue = &self.context.queue;
         let total = self.total_elements as u32;
-        let wg = (total + 255) / 256;
-        let wg_c = ((total * self.num_channels as u32) + 255) / 256;
-        let mut times = [0.0f64; 6];
+        let mut times = [0.0f64; 3];
 
         // Phase 1: Convolution
         let start = std::time::Instant::now();
         {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("fl::timed_conv"),
+                label: Some("ml::timed_conv"),
             });
             self.convolution.run(
                 device,
@@ -448,47 +364,23 @@ impl GpuFlowLenia {
         device.poll(wgpu::Maintain::Wait);
         times[0] = start.elapsed().as_secs_f64() * 1000.0;
 
-        // Phase 2a: Aggregation
+        // Phase 2: Growth
         let start = std::time::Instant::now();
         {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("fl::timed_agg"),
+                label: Some("ml::timed_growth"),
             });
-            self.aggregation.run(&mut encoder, wg_c);
+            self.growth.run(&mut encoder, total);
             queue.submit(Some(encoder.finish()));
         }
         device.poll(wgpu::Maintain::Wait);
         times[1] = start.elapsed().as_secs_f64() * 1000.0;
 
-        // Phase 2b: Gradient flow (Sobel + flow field)
-        let start = std::time::Instant::now();
-        {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("fl::timed_grad"),
-            });
-            self.gradient_flow.run(&mut encoder, wg, wg_c);
-            queue.submit(Some(encoder.finish()));
-        }
-        device.poll(wgpu::Maintain::Wait);
-        times[2] = start.elapsed().as_secs_f64() * 1000.0;
-
-        // Phase 2c: Advection
-        let start = std::time::Instant::now();
-        {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("fl::timed_adv"),
-            });
-            self.advection.run(&mut encoder, wg_c);
-            queue.submit(Some(encoder.finish()));
-        }
-        device.poll(wgpu::Maintain::Wait);
-        times[3] = start.elapsed().as_secs_f64() * 1000.0;
-
         // Phase 3: Buffer copy
         let start = std::time::Instant::now();
         {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("fl::timed_copy"),
+                label: Some("ml::timed_copy"),
             });
             encoder.copy_buffer_to_buffer(
                 &self.new_channel_buffer,
@@ -500,7 +392,7 @@ impl GpuFlowLenia {
             queue.submit(Some(encoder.finish()));
         }
         device.poll(wgpu::Maintain::Wait);
-        times[4] = start.elapsed().as_secs_f64() * 1000.0;
+        times[2] = start.elapsed().as_secs_f64() * 1000.0;
 
         times
     }

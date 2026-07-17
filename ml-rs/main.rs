@@ -1,12 +1,14 @@
+// -*- coding: utf-8 -*-
+// MaceLenia GPU simulation with video output.
+#![allow(non_snake_case, dead_code)]
+
 mod orchestrator;
 mod wfft;
 
 use clap::Parser;
-use orchestrator::GpuFlowLenia;
-use serde::Deserialize;
+use orchestrator::GpuMaceLenia;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 use wfft::WgpuContext;
 
 // ---------------------------------------------------------------------------
@@ -14,34 +16,34 @@ use wfft::WgpuContext;
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "fl-rs", about = "Flow Lenia GPU simulation")]
+#[command(name = "ml-rs", about = "MaceLenia GPU simulation")]
 struct Cli {
     /// Grid size (must be power of two, e.g. 64, 128, 256, 512, 1024)
-    #[arg(long, default_value = "512")]
+    #[arg(long, default_value = "256")]
     grid_size: usize,
 
     /// Simulation time step
     #[arg(long, default_value_t = 0.2)]
     dt: f32,
 
-    /// Reintegration stencil radius
-    #[arg(long, default_value_t = 5)]
-    dd: i32,
+    /// Number of channels
+    #[arg(long, default_value_t = 3)]
+    channels: usize,
 
-    /// Reintegration sigma
-    #[arg(long, default_value_t = 0.6)]
-    sigma: f32,
+    /// Number of kernels (typically channels^2)
+    #[arg(long, default_value_t = 9)]
+    kernels: usize,
 
     /// Path to trained kernel FFT file (optional)
     #[arg(long)]
     load_kernels: Option<String>,
 
     /// Video duration in seconds
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 30)]
     seconds: u32,
 
     /// Video frame rate
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 30)]
     fps: u32,
 
     /// Output directory for video
@@ -50,39 +52,107 @@ struct Cli {
 }
 
 // ---------------------------------------------------------------------------
-// Creature config (subset of the JSON)
+// Kernel generation (matches Python's generate_kernels_fft)
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct GrowthParams {
-    m: Vec<f32>,
-    s: Vec<f32>,
-    h: Vec<f32>,
+fn sigmoid(x: f32) -> f32 {
+    0.5 * ((x / 2.0).tanh() + 1.0)
 }
 
-#[derive(Deserialize)]
-struct BumpParams {
-    num_kernels: usize,
-}
+fn generate_kernels_fft(size: usize, num_kernels: usize) -> Vec<Vec<num_complex::Complex32>> {
+    let mid = size as i32 / 2;
+    let global_r = 10.0f32;
 
-#[derive(Deserialize)]
-struct CreatureConfig {
-    seed_size: usize,
-    num_channels: usize,
-    seed_channels: Vec<Vec<f64>>,
-    bump_params: BumpParams,
-    growth_params: GrowthParams,
+    let mut kernels = Vec::with_capacity(num_kernels);
+    for k in 0..num_kernels {
+        // Build spatial kernel with a simple Gaussian ring
+        let mut spatial = vec![0.0f32; size * size];
+        let radius = 0.5 + 0.3 * (k as f32 / num_kernels as f32);
+        let width = 0.05 + 0.03 * (k as f32 / num_kernels as f32);
+
+        for i in 0..size {
+            for j in 0..size {
+                let di = i as i32 - mid;
+                let dj = j as i32 - mid;
+                let dist = ((di * di + dj * dj) as f32).sqrt();
+                let d_scaled = dist / (global_r * radius);
+                let sig = sigmoid(-(d_scaled - 1.0) * 10.0);
+                let diff = d_scaled - 0.5;
+                let ker_val = (-(diff * diff) / (2.0 * width * width)).exp();
+                spatial[i * size + j] = sig * ker_val;
+            }
+        }
+
+        // Normalize
+        let total: f32 = spatial.iter().sum();
+        if total > 0.0 {
+            for v in spatial.iter_mut() {
+                *v /= total;
+            }
+        }
+
+        // FFT shift
+        let mut shifted = vec![0.0f32; size * size];
+        let half = size / 2;
+        for i in 0..size {
+            for j in 0..size {
+                let ni = (i + half) % size;
+                let nj = (j + half) % size;
+                shifted[ni * size + nj] = spatial[i * size + j];
+            }
+        }
+
+        // 2D FFT
+        use rustfft::{num_complex::Complex32, FftPlanner};
+        let mut planner = FftPlanner::<f32>::new();
+        let mut data: Vec<Complex32> = shifted.iter().map(|&v| Complex32::new(v, 0.0)).collect();
+
+        let fft_row = planner.plan_fft_forward(size);
+        for i in 0..size {
+            let mut row: Vec<Complex32> = (0..size).map(|j| data[i * size + j]).collect();
+            fft_row.process(&mut row);
+            for j in 0..size {
+                data[i * size + j] = row[j];
+            }
+        }
+
+        let fft_col = planner.plan_fft_forward(size);
+        for j in 0..size {
+            let mut col: Vec<Complex32> = (0..size).map(|i| data[i * size + j]).collect();
+            fft_col.process(&mut col);
+            for i in 0..size {
+                data[i * size + j] = col[i];
+            }
+        }
+
+        kernels.push(data);
+    }
+    kernels
 }
 
 // ---------------------------------------------------------------------------
-// Load creature config from seed/
+// Seed generation (Gaussian blob at center)
 // ---------------------------------------------------------------------------
 
-fn load_creature_config(name: &str) -> CreatureConfig {
-    let path = format!("seed/{}.json", name);
-    let config_str =
-        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read {}", path));
-    serde_json::from_str(&config_str).unwrap_or_else(|_| panic!("Failed to parse {}", path))
+fn generate_seed(size: usize, num_channels: usize) -> Vec<Vec<f64>> {
+    let mut channels = Vec::with_capacity(num_channels);
+    let variance = (size * size) as f64 / 64.0;
+    for c in 0..num_channels {
+        let mut ch = vec![0.0f64; size * size];
+        let cx = size as f64 / 2.0;
+        let cy = size as f64 / 2.0;
+        for i in 0..size {
+            for j in 0..size {
+                let dx = i as f64 - cx;
+                let dy = j as f64 - cy;
+                let dist = (dx * dx + dy * dy).sqrt();
+                let val = (-dist * dist / variance).exp();
+                ch[i * size + j] = val * (0.5 + 0.5 * c as f64 / num_channels as f64);
+            }
+        }
+        channels.push(ch);
+    }
+    channels
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +178,6 @@ fn load_kernels_fft(
         let base = k * kernel_bytes;
 
         if src_size == size {
-            // Same size: read directly
             for i in 0..kernel_len {
                 let offset = base + i * 8;
                 let re = f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
@@ -116,7 +185,6 @@ fn load_kernels_fft(
                 kernel[i] = num_complex::Complex32::new(re, im);
             }
         } else {
-            // Read source FFT kernel (stored as fft2(ifftshift(spatial)))
             let mut src = vec![num_complex::Complex32::new(0.0, 0.0); src_size * src_size];
             for i in 0..src_size * src_size {
                 let offset = base + i * 8;
@@ -125,7 +193,6 @@ fn load_kernels_fft(
                 src[i] = num_complex::Complex32::new(re, im);
             }
 
-            // fftshift: move DC from corners to center
             let half_src = src_size / 2;
             let mut centered = vec![num_complex::Complex32::new(0.0, 0.0); src_size * src_size];
             for i in 0..src_size {
@@ -136,7 +203,6 @@ fn load_kernels_fft(
                 }
             }
 
-            // Place in center of larger FFT array (zero-pad high frequencies)
             let pad = (size - src_size) / 2;
             for i in 0..src_size {
                 for j in 0..src_size {
@@ -144,7 +210,6 @@ fn load_kernels_fft(
                 }
             }
 
-            // ifftshift: move DC from center back to corners
             let half_dst = size / 2;
             let mut result = vec![num_complex::Complex32::new(0.0, 0.0); kernel_len];
             for i in 0..size {
@@ -165,28 +230,29 @@ fn load_kernels_fft(
 // Common setup
 // ---------------------------------------------------------------------------
 
-fn setup_simulation(cli: &Cli) -> (Arc<WgpuContext>, GpuFlowLenia, usize) {
+fn setup_simulation(cli: &Cli) -> (Arc<WgpuContext>, GpuMaceLenia, usize) {
     let grid_size = cli.grid_size;
-
-    // Load the single creature config
-    let config = load_creature_config("big_creature");
-    let num_channels = config.num_channels;
-    let num_kernels = config.bump_params.num_kernels;
-
-    // Build flat arrays
-    let all_kernel_m: Vec<f32> = config.growth_params.m.clone();
-    let all_kernel_s: Vec<f32> = config.growth_params.s.clone();
-    let all_kernel_h: Vec<f32> = config.growth_params.h.clone();
+    let num_channels = cli.channels;
+    let num_kernels = cli.kernels;
 
     // Build C0/C1 mapping: cyclic channel relationship.
+    // Each kernel maps an input channel to an output channel.
     let c0: Vec<u32> = (0..num_kernels as u32)
         .map(|k| k % num_channels as u32)
         .collect();
-    let c1: Vec<Vec<u32>> = (0..num_channels)
-        .map(|c| {
-            let src = ((c as u32) + 2) % 3;
-            (0..num_kernels as u32).filter(|&k| k % 3 == src).collect()
-        })
+    let c1: Vec<u32> = (0..num_kernels as u32)
+        .map(|k| (k / num_channels as u32) % num_channels as u32)
+        .collect();
+
+    // Growth params: mu, sigma, weights for each kernel
+    let mu: Vec<f32> = (0..num_kernels)
+        .map(|k| 0.1 + 0.05 * (k as f32 / num_kernels as f32))
+        .collect();
+    let sigma: Vec<f32> = (0..num_kernels)
+        .map(|k| 0.05 + 0.03 * (k as f32 / num_kernels as f32))
+        .collect();
+    let weights: Vec<f32> = (0..num_kernels)
+        .map(|_| 1.0 / num_channels as f32)
         .collect();
 
     println!("{} channels, {} kernels", num_channels, num_kernels);
@@ -202,7 +268,7 @@ fn setup_simulation(cli: &Cli) -> (Arc<WgpuContext>, GpuFlowLenia, usize) {
 
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
-            label: Some("Flow Lenia Device"),
+            label: Some("MaceLenia Device"),
             features: wgpu::Features::empty(),
             limits: wgpu::Limits {
                 max_buffer_size: 2 << 30,
@@ -216,42 +282,46 @@ fn setup_simulation(cli: &Cli) -> (Arc<WgpuContext>, GpuFlowLenia, usize) {
 
     let context = Arc::new(WgpuContext::from_device(device, queue));
 
-    // Flow Lenia setup
+    // MaceLenia setup
     let shape = grid_size.next_power_of_two();
 
-    let game = GpuFlowLenia::new(
+    let game = GpuMaceLenia::new(
         Arc::clone(&context),
         &[shape, shape],
         num_channels,
         num_kernels,
         &c0,
         &c1,
-        &all_kernel_m,
-        &all_kernel_s,
-        &all_kernel_h,
+        &mu,
+        &sigma,
+        &weights,
         cli.dt,
-        cli.dd,
-        cli.sigma,
     );
 
-    // Upload seed (already at the right grid size)
-    for (c, data) in config.seed_channels.iter().enumerate() {
+    // Generate and upload seed
+    let seed = generate_seed(shape, num_channels);
+    for (c, data) in seed.iter().enumerate() {
         game.upload_channel(data, c);
     }
 
-    // Load and upload kernels (file matches grid size)
-    let kernel_path = format!("kernels/big_creature_{}.bin", grid_size);
-    let kernels_fft = load_kernels_fft(&kernel_path, num_kernels, shape);
-    for (k, kfft) in kernels_fft.iter().enumerate() {
-        game.set_kernel(kfft, k);
+    // Generate and upload kernels
+    if let Some(ref kernel_path) = cli.load_kernels {
+        let kernels_fft = load_kernels_fft(kernel_path, num_kernels, shape);
+        for (k, kfft) in kernels_fft.iter().enumerate() {
+            game.set_kernel(kfft, k);
+        }
+    } else {
+        let kernels_fft = generate_kernels_fft(shape, num_kernels);
+        for (k, kfft) in kernels_fft.iter().enumerate() {
+            game.set_kernel(kfft, k);
+        }
     }
 
-    println!("Flow Lenia: GPU-Accelerated Mass-Conserving CA");
+    println!("MaceLenia: GPU-Accelerated Multi-channel CA");
     println!(
         "{} channels, {} kernels, {}x{} grid",
         num_channels, num_kernels, grid_size, grid_size,
     );
-    println!("Reintegration tracking: dd={}, sigma={}", cli.dd, cli.sigma);
 
     (context, game, grid_size)
 }
@@ -273,7 +343,7 @@ fn run_video(cli: Cli) {
     let (_context, game, grid_size) = setup_simulation(&cli);
 
     let total_frames = (cli.seconds as u64) * (cli.fps as u64);
-    let output_path = format!("{}/output.mp4", cli.output);
+    let output_path = format!("{}/ml_output.mp4", cli.output);
     let output_dir = PathBuf::from(&cli.output);
 
     std::fs::create_dir_all(&output_dir).expect("Failed to create output directory");
@@ -286,7 +356,7 @@ fn run_video(cli: Cli) {
 
     let shape = grid_size;
 
-    // Spawn ffmpeg and pipe raw grayscale frames to its stdin
+    // Spawn ffmpeg and pipe raw RGB frames to its stdin
     let mut ffmpeg = std::process::Command::new("ffmpeg")
         .args(&[
             "-y",
@@ -329,17 +399,28 @@ fn run_video(cli: Cli) {
 
         let data = game.download_all_channels();
 
-        // Map channels to RGB (matching the render shader):
+        // Map channels to RGB:
         //   c0 -> R, c1 -> G, c2 -> B
         //   color = clamp(channel * 1.5, 0, 1), then gamma = sqrt(color)
-        // No per-frame normalization -- fixed mapping prevents flickering.
         let mut pixels = vec![0u8; shape * shape * 3];
         for i in 0..shape {
             for j in 0..shape {
                 let idx = i * shape + j;
-                let c0 = data[0 * shape * shape + idx];
-                let c1 = data[1 * shape * shape + idx];
-                let c2 = data[2 * shape * shape + idx];
+                let c0 = if cli.channels > 0 {
+                    data[0 * shape * shape + idx]
+                } else {
+                    0.0
+                };
+                let c1 = if cli.channels > 1 {
+                    data[1 * shape * shape + idx]
+                } else {
+                    0.0
+                };
+                let c2 = if cli.channels > 2 {
+                    data[2 * shape * shape + idx]
+                } else {
+                    0.0
+                };
                 let r = (c0 * 1.5).clamp(0.0, 1.0).sqrt();
                 let g = (c1 * 1.5).clamp(0.0, 1.0).sqrt();
                 let b = (c2 * 1.5).clamp(0.0, 1.0).sqrt();

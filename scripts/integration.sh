@@ -21,7 +21,7 @@ for GRID in "${GRID_SIZES[@]}"; do
     .venv/bin/python3 train/save_frames_png.py --grid-size "$GRID" 2>&1 | tail -1
 
     echo "  [fl-rs] Generating frames..."
-    cargo run --release --bin fl-rs-save-pngs -- --grid-size "$GRID" 2>&1 | tail -1
+    cargo run --release --bin ml-rs-save-pngs -- --grid-size "$GRID" 2>&1 | tail -1
 
     echo "  [Compare] Python vs fl-rs..."
     .venv/bin/python3 train/compare_pngs.py 2>&1

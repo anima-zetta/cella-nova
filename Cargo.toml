@@ -1,22 +1,25 @@
 [package]
 name = "cella-nova"
 version = "0.1.0"
-authors = ["Zoran <lazovicff@gmail.com>"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [[bin]]
-name = "fl-rs"
-path = "fl-rs/main.rs"
+name = "ml-rs"
+path = "ml-rs/main.rs"
 
 [[bin]]
-name = "fl-rs-save-pngs"
-path = "fl-rs/save_pngs.rs"
+name = "ml-rs-profile"
+path = "ml-rs/profile.rs"
 
 [[bin]]
-name = "fl-rs-profile"
-path = "fl-rs/profile.rs"
+name = "ml-rs-save-pngs"
+path = "ml-rs/save_pngs.rs"
+
+[[bin]]
+name = "ml-rs-debug-fft"
+path = "ml-rs/debug_fft.rs"
 
 [dependencies]
 num-complex = "0.4.2"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare PNG frames from Python, reference Rust, and fl-rs Rust."""
+"""Compare PNG frames from Python and ml-rs Rust implementations."""
 import os
 import sys
 import numpy as np
@@ -9,8 +9,7 @@ PNG_DIR = "pngs"
 
 SETS = {
     "py":    {"prefix": "py_frame_",    "label": "Python"},
-    "rs":    {"prefix": "rs_frame_",    "label": "Reference"},
-    "fl_rs": {"prefix": "fl_rs_frame_", "label": "fl-rs"},
+    "ml_rs": {"prefix": "ml_rs_frame_", "label": "ml-rs"},
 }
 
 
@@ -85,8 +84,7 @@ def main() -> None:
     if not os.path.isdir(PNG_DIR):
         print(f"Error: '{PNG_DIR}/' directory not found.")
         print("Run the generators first:")
-        print("  cargo run --bin save_pngs")
-        print("  cargo run --bin fl-rs-save-pngs")
+        print("  cargo run --bin ml-rs-save-pngs")
         print("  python3 train/save_frames_png.py")
         sys.exit(1)
 
