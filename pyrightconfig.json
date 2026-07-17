@@ -1,5 +1,6 @@
 {
   "venvPath": ".",
   "venv": ".venv",
+  "extraPaths": ["train"],
   "typeCheckingMode": "basic"
 }
