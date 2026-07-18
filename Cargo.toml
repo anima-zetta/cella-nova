@@ -21,6 +21,10 @@ path = "ml-rs/save_pngs.rs"
 name = "ml-rs-debug-fft"
 path = "ml-rs/debug_fft.rs"
 
+[[bin]]
+name = "ml-rs-example"
+path = "ml-rs/example.rs"
+
 [dependencies]
 num-complex = "0.4.2"
 wgpu = "0.16"

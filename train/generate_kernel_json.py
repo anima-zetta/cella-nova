@@ -6,8 +6,8 @@ MaceLenia uses FFT-based convolution with ring-based Gaussian kernels,
 a bump growth function, and multi-channel dynamics.
 
 Outputs:
-  kernels/{name}_{grid_size}.bin  — FFT kernels at grid_size x grid_size
-  seed/{name}.json                — seed + MaceLenia params (mu, sigma, weights, etc.)
+  kernels/{name}_{grid_size}.bin  -- FFT kernels at grid_size x grid_size
+  seed/{name}.json                -- seed + MaceLenia params (mu, sigma, weights, etc.)
 """
 
 import argparse
@@ -24,35 +24,60 @@ NUM_CHANNELS: int = 3
 NUM_KERNELS: int = NUM_CHANNELS * NUM_CHANNELS  # 9 for 3 channels
 
 # ---------------------------------------------------------------------------
-# Reference creature config (proven stable — matches save_pngs.rs)
+# Reference creature config (optimized for DiffusionLenia)
 # ---------------------------------------------------------------------------
 
 def get_reference_config() -> dict[str, Any]:
-    """Return the reference MaceLenia configuration.
-    These parameters match the Rust reference implementations (save_pngs.rs / profile.rs).
+    """Return a DiffusionLenia-optimized creature configuration.
+
+    Key design principles for DiffusionLenia:
+    - Kernels span a wide range of radii to detect features at multiple scales
+    - Growth mu/sigma create diverse affinity responses across channel pairs
+    - Seed has multiple offset blobs to trigger directional pattern formation
+    - Weights are non-uniform to create channel specialization
     """
-    # Kernel generation params (Gaussian rings)
+    # Kernel generation params (Gaussian rings) -- wider range for diversity
     global_r = 10.0
-    radii = [0.5 + 0.3 * (k / NUM_KERNELS) for k in range(NUM_KERNELS)]
-    widths = [0.05 + 0.03 * (k / NUM_KERNELS) for k in range(NUM_KERNELS)]
+    radii = [0.25 + 0.6 * (k / NUM_KERNELS) for k in range(NUM_KERNELS)]
+    widths = [0.03 + 0.10 * (k / NUM_KERNELS) for k in range(NUM_KERNELS)]
 
     # Growth function params (per kernel, using permuted indexing to match
     # Python's state[:,:,None] channel ordering)
     # perm(k) = (k % C) * C + (k // C)
     perm = [((k % NUM_CHANNELS) * NUM_CHANNELS + (k // NUM_CHANNELS)) for k in range(NUM_KERNELS)]
-    growth_mu = [0.1 + 0.05 * (perm[k] / NUM_KERNELS) for k in range(NUM_KERNELS)]
-    growth_sigma = [0.05 + 0.03 * (perm[k] / NUM_KERNELS) for k in range(NUM_KERNELS)]
-    growth_weights = [1.0 / NUM_CHANNELS] * NUM_KERNELS
+
+    # Mu values: spread across a wider range for diverse affinity responses.
+    # Lower mu = cells flow at lower densities (sparser patterns).
+    # Higher mu = cells flow at higher densities (denser patterns).
+    # Mix both for interesting dynamics.
+    growth_mu = [0.05 + 0.20 * (perm[k] / NUM_KERNELS) for k in range(NUM_KERNELS)]
+
+    # Sigma values: proportional to mu, with some variation.
+    # Narrow sigma = sharp affinity transitions (crisp edges).
+    # Wide sigma = smooth affinity transitions (diffuse boundaries).
+    growth_sigma = [0.03 + 0.12 * (perm[k] / NUM_KERNELS) for k in range(NUM_KERNELS)]
+
+    # Non-uniform weights: diagonal (same channel) pairs have higher weight,
+    # cross-channel pairs have lower weight. This creates channel specialization.
+    growth_weights = []
+    for k in range(NUM_KERNELS):
+        in_ch = k % NUM_CHANNELS
+        out_ch = k // NUM_CHANNELS
+        if in_ch == out_ch:
+            growth_weights.append(0.5)  # same-channel: strong self-influence
+        else:
+            growth_weights.append(0.25)  # cross-channel: weaker influence
 
     # C0/C1 channel mapping: c0[k] = input channel, c1[k] = output channel
     c0 = [k % NUM_CHANNELS for k in range(NUM_KERNELS)]
     c1 = [k // NUM_CHANNELS for k in range(NUM_KERNELS)]
 
-    # Seed: 3-channel flat-top blob, ~50% grid coverage, slight offsets
+    # Seed: multiple offset blobs with different sizes per channel.
+    # This creates asymmetry that drives directional pattern formation.
     seed_params = [
-        {"radius": 0.5, "offset_x": 0.0,  "offset_y": 0.0,  "amplitude": 0.4},
-        {"radius": 0.5, "offset_x": 0.04, "offset_y": 0.0,  "amplitude": 0.4},
-        {"radius": 0.5, "offset_x": 0.0,  "offset_y": 0.04, "amplitude": 0.4},
+        {"radius": 0.35, "offset_x": -0.15, "offset_y": 0.0,   "amplitude": 0.5, "edge_width": 0.08},
+        {"radius": 0.30, "offset_x": 0.1,   "offset_y": -0.1,  "amplitude": 0.45, "edge_width": 0.06},
+        {"radius": 0.25, "offset_x": 0.05,  "offset_y": 0.15,  "amplitude": 0.4, "edge_width": 0.1},
     ]
 
     return {
@@ -71,7 +96,7 @@ def get_reference_config() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Kernel generation — MaceLenia style (Gaussian rings, matches ml-rs)
+# Kernel generation -- MaceLenia style (Gaussian rings, matches ml-rs)
 # ---------------------------------------------------------------------------
 
 def sigmoid(x: float) -> float:
