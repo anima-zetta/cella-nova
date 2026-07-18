@@ -1,19 +1,22 @@
-//! GPU-resident MaceLenia (Multi-channel Lenia) simulation.
+//! GPU-resident DiffusionLenia (mass-conserving Multi-channel Lenia) simulation.
 //!
-//! Implements the MaceLenia algorithm from `train/lenia_org.py`:
+//! Implements the DiffusionLenia algorithm from `train/diff_lenia_org.py`:
 //! - Multi-channel, multi-kernel architecture with FFT-based convolution
 //! - Ring-based kernels (pre-FFT'd on CPU)
 //! - Bump growth function: G(u) = 2*exp(-((u-mu)/sigma)^2/2) - 1
 //! - Weighted sum over input channels per output channel
-//! - Euler step with clamping to [0, 1]
+//! - Affinity: exp(temp * weighted_sum)
+//! - Diffusion step: mass-conserving redistribution via 3x3 local normalization
 //!
 //! All computation runs on the GPU with zero CPU readback between frames.
 
 mod convolution;
+mod diffusion;
 mod growth;
 
 use crate::wfft::WgpuContext;
 use convolution::ConvolutionPhase;
+use diffusion::DiffusionPhase;
 use growth::GrowthPhase;
 use std::sync::Arc;
 
@@ -54,14 +57,19 @@ pub struct GpuMaceLenia {
     // --- Packed GPU buffers ---
     /// All channels packed: [C * H * W] f32
     channel_buffer: wgpu::Buffer,
-    /// Output of Euler step: [C * H * W] f32
+    /// Output of diffusion step: [C * H * W] f32
     new_channel_buffer: wgpu::Buffer,
+    /// Affinity buffer (weighted sum before diffusion): [C * H * W] f32
+    affinity_buffer: wgpu::Buffer,
+    /// Temp buffer for Z values (3x3 sum of aff_exp): [C * H * W] f32
+    z_buffer: wgpu::Buffer,
     /// All kernels FFT'd: [K * H * W] vec2<f32>
     kernel_buffer: wgpu::Buffer,
 
     // --- Phase sub-structs ---
     convolution: ConvolutionPhase,
     growth: GrowthPhase,
+    diffusion: DiffusionPhase,
 }
 
 impl GpuMaceLenia {
@@ -77,11 +85,12 @@ impl GpuMaceLenia {
         sigma: &[f32],
         weights: &[f32],
         dt: f32,
+        temp: f32,
     ) -> Self {
         let device = &context.device;
         let queue = &context.queue;
 
-        assert_eq!(shape.len(), 2, "MaceLenia requires 2D grids");
+        assert_eq!(shape.len(), 2, "DiffusionLenia requires 2D grids");
         let total_elements: usize = shape.iter().product();
 
         // --- Create all shared GPU buffers ---
@@ -99,6 +108,8 @@ impl GpuMaceLenia {
         let ch_size = (total_elements * num_channels * 4) as u64;
         let channel_buffer = make_storage("ml::channel", ch_size);
         let new_channel_buffer = make_storage("ml::new_channel", ch_size);
+        let affinity_buffer = make_storage("ml::affinity", ch_size);
+        let z_buffer = make_storage("ml::z_buffer", ch_size);
 
         let k_size = (total_elements * num_kernels * 8) as u64;
         let kernel_buffer = make_storage("ml::kernel", k_size);
@@ -136,6 +147,18 @@ impl GpuMaceLenia {
             weights,
             dt,
             &convolution.conv_buffer,
+            &affinity_buffer,
+        );
+
+        let diffusion = DiffusionPhase::new(
+            device,
+            queue,
+            compute_shader,
+            shape,
+            num_channels,
+            temp,
+            &affinity_buffer,
+            &z_buffer,
             &channel_buffer,
             &new_channel_buffer,
         );
@@ -150,9 +173,12 @@ impl GpuMaceLenia {
             c1: c1.to_vec(),
             channel_buffer,
             new_channel_buffer,
+            affinity_buffer,
+            z_buffer,
             kernel_buffer,
             convolution,
             growth,
+            diffusion,
         }
     }
 
@@ -261,11 +287,13 @@ impl GpuMaceLenia {
     // Main iteration
     // =======================================================================
 
-    /// Performs a single MaceLenia iteration entirely on the GPU.
+    /// Performs a single DiffusionLenia iteration entirely on the GPU.
     ///
     /// Algorithm:
     /// 1. For each input channel: FFT → complex multiply with each kernel → IFFT
-    /// 2. For each pixel: growth function → weighted sum → Euler step
+    /// 2. For each pixel: growth function → weighted sum → affinity buffer
+    /// 3. Diffusion: aff_exp = exp(temp * affinity), Z = 3x3 sum, redistribute mass
+    /// 4. Copy new_channel → channel
     pub fn iterate(&self) {
         let device = &self.context.device;
         let queue = &self.context.queue;
@@ -288,10 +316,13 @@ impl GpuMaceLenia {
             &self.shape,
         );
 
-        // Phase 2: Growth + weighted sum + Euler step
+        // Phase 2: Growth + weighted sum → affinity buffer
         self.growth.run(&mut encoder, total);
 
-        // Phase 3: Copy new_channel → channel
+        // Phase 3: Diffusion (pass 1: aff_exp + Z, pass 2: redistribute)
+        self.diffusion.run(&mut encoder, total);
+
+        // Phase 4: Copy new_channel → channel
         encoder.copy_buffer_to_buffer(
             &self.new_channel_buffer,
             0,
@@ -322,10 +353,13 @@ impl GpuMaceLenia {
             &self.shape,
         );
 
-        // Phase 2: Growth + weighted sum + Euler step
+        // Phase 2: Growth + weighted sum → affinity buffer
         self.growth.run(encoder, total);
 
-        // Phase 3: Copy new_channel → channel
+        // Phase 3: Diffusion
+        self.diffusion.run(encoder, total);
+
+        // Phase 4: Copy new_channel → channel
         encoder.copy_buffer_to_buffer(
             &self.new_channel_buffer,
             0,
@@ -336,11 +370,11 @@ impl GpuMaceLenia {
     }
 
     /// Performs a single iteration with per-phase GPU timing.
-    pub fn timed_iterate(&self) -> [f64; 3] {
+    pub fn timed_iterate(&self) -> [f64; 4] {
         let device = &self.context.device;
         let queue = &self.context.queue;
         let total = self.total_elements as u32;
-        let mut times = [0.0f64; 3];
+        let mut times = [0.0f64; 4];
 
         // Phase 1: Convolution
         let start = std::time::Instant::now();
@@ -376,7 +410,19 @@ impl GpuMaceLenia {
         device.poll(wgpu::Maintain::Wait);
         times[1] = start.elapsed().as_secs_f64() * 1000.0;
 
-        // Phase 3: Buffer copy
+        // Phase 3: Diffusion
+        let start = std::time::Instant::now();
+        {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ml::timed_diffusion"),
+            });
+            self.diffusion.run(&mut encoder, total);
+            queue.submit(Some(encoder.finish()));
+        }
+        device.poll(wgpu::Maintain::Wait);
+        times[2] = start.elapsed().as_secs_f64() * 1000.0;
+
+        // Phase 4: Buffer copy
         let start = std::time::Instant::now();
         {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -392,7 +438,7 @@ impl GpuMaceLenia {
             queue.submit(Some(encoder.finish()));
         }
         device.poll(wgpu::Maintain::Wait);
-        times[2] = start.elapsed().as_secs_f64() * 1000.0;
+        times[3] = start.elapsed().as_secs_f64() * 1000.0;
 
         times
     }

@@ -1,8 +1,9 @@
-//! Growth phase for MaceLenia.
+//! Growth phase for DiffusionLenia.
 //!
 //! Applies the bump growth function to each convolution result,
 //! performs weighted sum over input channels per output channel,
-//! and applies the Euler step with clamping to [0, 1].
+//! and writes the result (affinity) to the affinity buffer.
+//! The Euler step is replaced by the diffusion phase.
 
 // ===========================================================================
 // GrowthPhase
@@ -34,8 +35,7 @@ impl GrowthPhase {
         weights: &[f32],
         dt: f32,
         conv_buffer: &wgpu::Buffer,
-        channel_buffer: &wgpu::Buffer,
-        new_channel_buffer: &wgpu::Buffer,
+        affinity_buffer: &wgpu::Buffer,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ml::growth"),
@@ -112,16 +112,6 @@ impl GrowthPhase {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 8,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 9,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -209,17 +199,9 @@ impl GrowthPhase {
                     }),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: channel_buffer,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-                wgpu::BindGroupEntry {
                     binding: 10,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: new_channel_buffer,
+                        buffer: affinity_buffer,
                         offset: 0,
                         size: None,
                     }),

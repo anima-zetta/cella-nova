@@ -319,7 +319,7 @@ fn complex_mul_main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // ---------------------------------------------------------------------------
-// mcl_growth: growth function + weighted sum + Euler step  (bindings 8-14)
+// mcl_growth: growth function + weighted sum -> affinity  (bindings 8-14)
 // ---------------------------------------------------------------------------
 struct MclParams {
     width: u32,
@@ -330,8 +330,7 @@ struct MclParams {
 }
 
 @group(0) @binding(8) var<storage, read> mcl_conv: array<vec2<f32>>;
-@group(0) @binding(9) var<storage, read> mcl_channel: array<f32>;
-@group(0) @binding(10) var<storage, read_write> mcl_new_channel: array<f32>;
+@group(0) @binding(10) var<storage, read_write> mcl_affinity: array<f32>;
 @group(0) @binding(11) var<storage, read> mcl_growth_params: array<vec2<f32>>;
 @group(0) @binding(12) var<storage, read> mcl_weights: array<f32>;
 @group(0) @binding(13) var<storage, read> mcl_c1: array<u32>;
@@ -360,10 +359,95 @@ fn mcl_growth_main(@builtin(global_invocation_id) id: vec3<u32>) {
         dx[out_ch] = dx[out_ch] + g * mcl_weights[k];
     }
 
-    // Euler step with clamping to [0, 1]
     for (var c: u32 = 0u; c < mcl_params.num_channels; c = c + 1u) {
-        let old_val: f32 = mcl_channel[c * total_pixels + p];
-        let new_val: f32 = min(max(old_val + mcl_params.dt * dx[c], 0.0), 1.0);
-        mcl_new_channel[c * total_pixels + p] = new_val;
+        mcl_affinity[c * total_pixels + p] = dx[c];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DiffusionLenia: affinity exponential + local normalization  (bindings 15-17)
+// Pass 1: compute aff_exp = exp(temp * affinity) and Z = 3x3 sum of aff_exp
+// ---------------------------------------------------------------------------
+struct DiffusionParams {
+    width: u32,
+    num_channels: u32,
+    temp: f32,
+}
+
+@group(0) @binding(15) var<storage, read_write> diff_affinity: array<f32>;
+@group(0) @binding(16) var<storage, read_write> diff_Z: array<f32>;
+@group(0) @binding(17) var<uniform> diff_params: DiffusionParams;
+
+@compute @workgroup_size(256)
+fn diffusion_pass1_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let p: u32 = id.x;
+    let w: u32 = diff_params.width;
+    let total_pixels: u32 = w * w;
+    if (p >= total_pixels) { return; }
+
+    let px: u32 = p % w;
+    let py: u32 = p / w;
+
+    for (var c: u32 = 0u; c < diff_params.num_channels; c = c + 1u) {
+        let base: u32 = c * total_pixels;
+
+        // Compute Z = sum of aff_exp over 3x3 neighborhood
+        var Z: f32 = 0.0;
+        for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
+            for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
+                let nx: u32 = (w + px + u32(dx)) % w;
+                let ny: u32 = (w + py + u32(dy)) % w;
+                let n: u32 = ny * w + nx;
+                let a: f32 = diff_affinity[base + n];
+                Z = Z + exp(diff_params.temp * a);
+            }
+        }
+
+        // Store Z to temp buffer (affinity buffer is NOT modified)
+        diff_Z[base + p] = Z;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DiffusionLenia: mass redistribution  (bindings 15-19)
+// Pass 2: new_state[p] = aff_exp[p] * sum over 3x3 of (state[n] / Z[n])
+// ---------------------------------------------------------------------------
+@group(0) @binding(15) var<storage, read> diff2_affinity: array<f32>;
+@group(0) @binding(16) var<storage, read> diff2_Z: array<f32>;
+@group(0) @binding(18) var<storage, read> diff2_channel: array<f32>;
+@group(0) @binding(19) var<storage, read_write> diff2_new_channel: array<f32>;
+@group(0) @binding(17) var<uniform> diff2_params: DiffusionParams;
+
+@compute @workgroup_size(256)
+fn diffusion_pass2_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let p: u32 = id.x;
+    let w: u32 = diff2_params.width;
+    let total_pixels: u32 = w * w;
+    if (p >= total_pixels) { return; }
+
+    let px: u32 = p % w;
+    let py: u32 = p / w;
+
+    for (var c: u32 = 0u; c < diff2_params.num_channels; c = c + 1u) {
+        let base: u32 = c * total_pixels;
+
+        // Recompute aff_exp from original affinity (not overwritten by pass 1)
+        let a: f32 = diff2_affinity[base + p];
+        let aff_exp: f32 = exp(diff2_params.temp * a);
+
+        // Sum state[n] / Z[n] over 3x3 neighborhood
+        var sum: f32 = 0.0;
+        for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
+            for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
+                let nx: u32 = (w + px + u32(dx)) % w;
+                let ny: u32 = (w + py + u32(dy)) % w;
+                let n: u32 = ny * w + nx;
+                let s: f32 = diff2_channel[base + n];
+                let Z_n: f32 = diff2_Z[base + n];
+                sum = sum + s / Z_n;
+            }
+        }
+
+        diff2_new_channel[base + p] = aff_exp * sum;
     }
 }
