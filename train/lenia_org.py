@@ -57,7 +57,8 @@ class MCLenia(DevModule):
             self.params = params
 
         self.k_size = cast(int, self.params['k_size']) # kernel sizes (same for all) ODD for conv2d, even for fft
-        self.register_buffer('state',torch.rand((self.batch,self.C,self.h,self.w), dtype=torch.float32))
+        state_tensor = torch.rand((self.batch,self.C,self.h,self.w), dtype=torch.float32, device=device)
+        self.register_buffer('state', state_tensor)
 
         if(state_init is None):
             self.set_init_fractal() # Fractal perlin init
@@ -67,15 +68,22 @@ class MCLenia(DevModule):
         self.dt = dt
 
         # Buffer for all parameters since we do not require_grad for them :
-        self.register_buffer('mu', cast(torch.Tensor, self.params['mu']))
-        self.register_buffer('sigma', cast(torch.Tensor, self.params['sigma']))
-        self.register_buffer('beta', cast(torch.Tensor, self.params['beta']))
-        self.register_buffer('mu_k', cast(torch.Tensor, self.params['mu_k']))
-        self.register_buffer('sigma_k', cast(torch.Tensor, self.params['sigma_k']))
-        self.register_buffer('weights', cast(torch.Tensor, self.params['weights']))
-        self.register_buffer('kernel',torch.zeros((self.k_size,self.k_size), dtype=torch.float32))
+        # Delete any attributes set by BatchParams.__setattr__ so register_buffer works
+        for _name in ['mu', 'sigma', 'beta', 'mu_k', 'sigma_k', 'weights', 'kernel']:
+            try:
+                delattr(self, _name)
+            except AttributeError:
+                pass
+        self.register_buffer('mu', cast(torch.Tensor, self.params['mu']).to(self.device))
+        self.register_buffer('sigma', cast(torch.Tensor, self.params['sigma']).to(self.device))
+        self.register_buffer('beta', cast(torch.Tensor, self.params['beta']).to(self.device))
+        self.register_buffer('mu_k', cast(torch.Tensor, self.params['mu_k']).to(self.device))
+        self.register_buffer('sigma_k', cast(torch.Tensor, self.params['sigma_k']).to(self.device))
+        self.register_buffer('weights', cast(torch.Tensor, self.params['weights']).to(self.device))
+        self.register_buffer('kernel',torch.zeros((self.k_size,self.k_size), dtype=torch.float32, device=self.device))
 
         self.update_params(self.params)
+        self.to(self.device)
 
     def update_params(self, params, k_size_override = None):
         """
@@ -260,7 +268,7 @@ class MCLenia(DevModule):
             Compute convolution using fft
         """
         state = torch.fft.fft2(state) # (B,C,H,W) fourier transform
-        state = state[:,None] # (B,1,C,H,W)
+        state = state[:,:,None] # (B,1,C,H,W)
         state = state*self.fft_kernel # (B,C,C,H,W), convoluted
         state = torch.fft.ifft2(state) # (B,C,C,H,W), back to spatial domain
 

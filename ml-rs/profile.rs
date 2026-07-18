@@ -139,11 +139,12 @@ fn main() {
 
     let dt: f32 = 0.2;
 
+    let perm = |k: usize| (k % num_channels) * num_channels + (k / num_channels);
     let mu: Vec<f32> = (0..num_kernels)
-        .map(|k| 0.1 + 0.05 * (k as f32 / num_kernels as f32))
+        .map(|k| 0.1 + 0.05 * (perm(k) as f32 / num_kernels as f32))
         .collect();
     let sigma: Vec<f32> = (0..num_kernels)
-        .map(|k| 0.05 + 0.03 * (k as f32 / num_kernels as f32))
+        .map(|k| 0.05 + 0.03 * (perm(k) as f32 / num_kernels as f32))
         .collect();
     let weights: Vec<f32> = (0..num_kernels)
         .map(|_| 1.0 / num_channels as f32)
@@ -188,10 +189,11 @@ fn main() {
         dt,
     );
 
-    // Generate and upload kernels
+    // Generate and upload kernels (permuted to match Python state[:,:,None] indexing)
     let kernels_fft = generate_kernels_fft(shape, num_kernels);
-    for (k, kfft) in kernels_fft.iter().enumerate() {
-        game.set_kernel(kfft, k);
+    for k in 0..num_kernels {
+        let perm_idx = (k % num_channels) * num_channels + (k / num_channels);
+        game.set_kernel(&kernels_fft[perm_idx], k);
     }
 
     // Generate and upload seed
