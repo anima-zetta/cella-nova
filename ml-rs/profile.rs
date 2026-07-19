@@ -85,8 +85,7 @@ fn main() {
     let kernel_path = format!("kernels/{}_{}.bin", creature, shape);
     let kernels_fft = load_kernels(&kernel_path, num_kernels, shape);
     for k in 0..num_kernels {
-        let perm_idx = (k % num_channels) * num_channels + (k / num_channels);
-        game.set_kernel(&kernels_fft[perm_idx], k);
+        game.set_kernel(&kernels_fft[k], k);
     }
 
     println!("\n=== Profiling {}x{} grid ===", shape, shape);

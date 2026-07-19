@@ -127,12 +127,11 @@ fn main() {
         game.upload_channel(data, c);
     }
 
-    // Upload kernels (with permutation to match Python state[:,:,None] indexing)
+    // Upload kernels (in natural order — c0 cycles 0,1,2, c1 increments every C)
     let kernel_path = format!("kernels/{}_{}.bin", creature, shape);
     let kernels_fft = load_kernels(&kernel_path, num_kernels, shape);
     for k in 0..num_kernels {
-        let perm_idx = (k % num_channels) * num_channels + (k / num_channels);
-        game.set_kernel(&kernels_fft[perm_idx], k);
+        game.set_kernel(&kernels_fft[k], k);
     }
 
     // Save initial state

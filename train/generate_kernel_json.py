@@ -266,7 +266,7 @@ def main() -> None:
         description="Generate a MaceLenia creature (kernels + seed)"
     )
     parser.add_argument("--grid-size", type=int, default=512,
-                        choices=[64, 128, 256, 512, 1024],
+                        choices=[64, 128, 256, 512, 1024, 2048],
                         help="Grid size (default: 512)")
     parser.add_argument("--name", type=str, default="mcl_creature",
                         help="Creature name (default: mcl_creature)")

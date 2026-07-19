@@ -442,7 +442,7 @@ def main() -> None:
         description="Convert demo_params/*.pt to MaceLenia creatures"
     )
     parser.add_argument("--grid-size", type=int, default=512,
-                        choices=[64, 128, 256, 512, 1024],
+                        choices=[64, 128, 256, 512, 1024, 2048],
                         help="Grid size (default: 512)")
     parser.add_argument("--name", type=str, default=None,
                         help="Convert a single .pt file by name (without .pt extension)")
