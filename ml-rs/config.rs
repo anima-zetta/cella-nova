@@ -22,9 +22,6 @@ pub struct SimConfig {
     pub growth_mu: Vec<f32>,
     pub growth_sigma: Vec<f32>,
     pub growth_weights: Vec<f32>,
-    pub global_r: f64,
-    pub radii: Vec<f64>,
-    pub widths: Vec<f64>,
 }
 
 // ===========================================================================

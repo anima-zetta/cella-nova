@@ -8,7 +8,7 @@ For each .pt file in demo_params/, this script:
   3. Pads kernels to the target grid size and computes their FFT
   4. Saves FFT kernels as kernels/{name}_{grid_size}.bin
   5. Extracts growth params (mu, sigma, weights) and c0/c1 mapping
-  6. Generates a default seed (Gaussian blobs)
+  6. Generates a fractal Perlin noise seed
   7. Saves the creature config as seed/{name}.json
 
 Usage:
@@ -20,13 +20,26 @@ Usage:
 
 import argparse
 import json
-import math
 import os
 import struct
 import sys
 
 import numpy as np
 import torch
+from pyperlin import FractalPerlin2D
+
+# ---------------------------------------------------------------------------
+# Perlin noise seed constants
+# ---------------------------------------------------------------------------
+
+# Dominant feature size in pixels (default: grid_size // 6, set at call site).
+PERLIN_WAVELENGTH: int | None = None
+# Amplitude falloff per octave.
+PERLIN_PERSISTENCE: float = 0.5
+# Fraction of seed pixels clamped to 0.
+PERLIN_BLACK_PROP: float = 0.3
+# RNG seed for reproducible noise (None = random).
+PERLIN_SEED: int | None = None
 
 # ---------------------------------------------------------------------------
 # Kernel generation — matches MCLenia.kernel_slice + compute_kernel
@@ -102,39 +115,154 @@ def kernel_to_fft(kernel: np.ndarray, grid_size: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Seed generation
+# Seed generation — Perlin noise  (via pyperlin library)
 # ---------------------------------------------------------------------------
 
-def generate_seed_channels(
-    grid_size: int, num_channels: int
-) -> list[list[float]]:
-    """Generate seed channels as smooth flat-top blobs with offsets.
+def _fractal_noise_2d(
+    shape: tuple[int, int],
+    max_wavelength: int,
+    persistence: float = 0.5,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Generate fractal Perlin noise using the pyperlin library.
 
-    Matches the style from generate_kernel_json.py.
+    Matches the approach in train/utils/noise_gen.py: each octave is
+    generated separately via FractalPerlin2D and summed.
+
+    Args:
+        shape: (H, W) of the output grid.
+        max_wavelength: largest feature size in pixels.
+        persistence: amplitude scaling per octave (default 0.5).
+        rng: numpy random generator (used for torch seed).
+
+    Returns:
+        (H, W) float64 numpy array in approximately [-1, 1].
     """
-    coords = [-1.0 + 2.0 * i / (grid_size - 1) for i in range(grid_size)]
-    channels = [[0.0] * (grid_size * grid_size) for _ in range(num_channels)]
+    H, W = shape
+    max_octaves = min(6, int(np.log2(max_wavelength)))
+    if max_octaves < 1:
+        max_octaves = 1
 
-    seed_params = [
-        {"radius": 0.35, "offset_x": -0.15, "offset_y": 0.0, "amplitude": 0.5, "edge_width": 0.08},
-        {"radius": 0.30, "offset_x": 0.1, "offset_y": -0.1, "amplitude": 0.45, "edge_width": 0.06},
-        {"radius": 0.25, "offset_x": 0.05, "offset_y": 0.15, "amplitude": 0.4, "edge_width": 0.1},
+    # Seed the torch generator from the numpy rng state.
+    if rng is not None:
+        torch_seed = rng.integers(0, 2 ** 31 - 1)
+    else:
+        torch_seed = None
+
+    norm = sum(persistence ** (i + 1) for i in range(max_octaves))
+    noise = np.zeros((H, W), dtype=np.float64)
+
+    for i in range(max_octaves):
+        wl = int(max_wavelength * 0.5 ** i)
+        if wl < 1:
+            wl = 1
+
+        # Pad grid to a multiple of the wavelength (required by pyperlin).
+        pad_h = int(np.ceil(H / wl) * wl)
+        pad_w = int(np.ceil(W / wl) * wl)
+        freq_y = pad_h // wl
+        freq_x = pad_w // wl
+
+        gen = torch.Generator(device="cpu")
+        if torch_seed is not None:
+            gen.manual_seed(int(torch_seed + i))
+
+        fp = FractalPerlin2D(
+            (1, pad_h, pad_w),
+            [[freq_y, freq_x]],
+            [1.0 / 0.7053],
+            generator=gen,
+        )()
+        octave = fp[0, :H, :W].cpu().numpy()
+        noise += persistence ** (i + 1) * octave
+
+    return noise / norm
+
+
+def _apply_black_prop(noise: np.ndarray, black_prop: float) -> np.ndarray:
+    """Scale and clamp noise to [0, 1] with a given black proportion.
+
+    Values below the black_prop threshold are clamped to 0, creating
+    scattered "empty" regions that help seed formation.
+    """
+    scaled = (noise + (0.5 - black_prop) * 2.0) / (2.0 * (1.0 - black_prop))
+    return np.clip(scaled, 0.0, 1.0)
+
+
+def generate_seed_perlin(
+    grid_size: int,
+    num_channels: int,
+    *,
+    wavelength: int | None = None,
+    persistence: float = 0.5,
+    black_prop: float = 0.3,
+    seed: int | None = None,
+) -> list[list[float]]:
+    """Generate seed channels as circular blobs filled with fractal Perlin noise.
+
+    Each channel gets a circular region (with per-channel position, radius,
+    and edge softness) filled with independent 2D Perlin noise.  This
+    combines the localised structure of the original Gaussian-blob seed
+    with the rich texture of fractal noise.
+
+    Args:
+        grid_size: grid width/height in pixels.
+        num_channels: number of channels.
+        wavelength: dominant feature size (default: grid_size // 10).
+        persistence: amplitude falloff per octave (default 0.5).
+        black_prop: fraction of pixels clamped to 0 (default 0.3).
+        seed: rng seed for reproducible noise.
+
+    Returns:
+        List of ``num_channels`` flat arrays, each ``grid_size * grid_size``
+        floats in [0, 1].
+    """
+    if wavelength is None:
+        wavelength = max(4, grid_size // 6)
+    rng = np.random.default_rng(seed)
+
+    # Per-channel blob parameters (same layout as the original Gaussian seed).
+    blob_params = [
+        {"radius": 0.65, "offset_x": -0.05, "offset_y": 0.0,   "amplitude": 0.5, "edge_width": 0.08},
+        {"radius": 0.60, "offset_x": 0.03,  "offset_y": -0.03, "amplitude": 0.45, "edge_width": 0.06},
+        {"radius": 0.55, "offset_x": 0.02,  "offset_y": 0.04,  "amplitude": 0.4,  "edge_width": 0.1},
     ]
 
-    for iy in range(grid_size):
-        for ix in range(grid_size):
-            gx = coords[ix]
-            gy = coords[iy]
-            idx = iy * grid_size + ix
-            for c, ch in enumerate(seed_params):
-                dx = gx - ch.get("offset_x", 0.0)
-                dy = gy - ch.get("offset_y", 0.0)
-                d = math.sqrt(dx * dx + dy * dy)
-                radius = ch.get("radius", 0.5)
-                edge_width = ch.get("edge_width", 0.1)
-                val = 0.5 * (1.0 - math.tanh((d - radius) / edge_width))
-                amp = ch.get("amplitude", 1.0)
-                channels[c][idx] = max(0.0, min(1.0, val * amp))
+    # Normalised pixel coordinates in [-1, 1].
+    coords = np.linspace(-1.0, 1.0, grid_size)
+    X, Y = np.meshgrid(coords, coords, indexing="xy")
+
+    shape = (grid_size, grid_size)
+    channels: list[list[float]] = []
+
+    for c in range(num_channels):
+        bp = blob_params[c % len(blob_params)]
+        cx = bp["offset_x"]
+        cy = bp["offset_y"]
+        radius = bp["radius"]
+        edge = bp["edge_width"]
+        amp = bp["amplitude"]
+
+        # --- Circular mask (smooth step, same as original Gaussian seed) ---
+        dist = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
+        mask = 0.5 * (1.0 - np.tanh((dist - radius) / edge))
+        mask = np.clip(mask, 0.0, 1.0)
+
+        # --- 2D fractal Perlin noise ---
+        raw = _fractal_noise_2d(shape, wavelength, persistence, rng)
+
+        # Normalise noise to [-1, 1] so _apply_black_prop thresholds correctly.
+        lo, hi = raw.min(), raw.max()
+        if hi > lo:
+            norm = 2.0 * (raw - lo) / (hi - lo) - 1.0
+        else:
+            norm = raw - lo
+
+        noise_ch = _apply_black_prop(norm, black_prop)
+
+        # --- Combine: noise inside the circle, zero outside ---
+        ch = noise_ch * mask * amp
+        channels.append(ch.ravel().tolist())
 
     return channels
 
@@ -179,9 +307,6 @@ def save_seed_json(
         "growth_mu": params["growth_mu"],
         "growth_sigma": params["growth_sigma"],
         "growth_weights": params["growth_weights"],
-        "global_r": params.get("global_r", 10.0),
-        "radii": params.get("radii", []),
-        "widths": params.get("widths", []),
     }
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
@@ -197,12 +322,22 @@ def convert_pt_to_creature(
     pt_path: str,
     grid_size: int,
     output_dir: str = ".",
+    skip_existing: bool = False,
 ) -> str:
     """Convert a single .pt parameter file to a MaceLenia creature.
 
-    Returns the creature name (stem of the .pt file).
+    Returns the creature name (stem of the .pt file), or None if skipped.
     """
     name = os.path.splitext(os.path.basename(pt_path))[0]
+
+    # Check if both output files already exist.
+    if skip_existing:
+        json_path = os.path.join(output_dir, "seed", f"{name}.json")
+        bin_path = os.path.join(output_dir, "kernels", f"{name}_{grid_size}.bin")
+        if os.path.exists(json_path) and os.path.exists(bin_path):
+            print(f"  Skipping {name} @ {grid_size}x{grid_size} (already exists)")
+            return None
+
     print(f"\n=== {name} @ {grid_size}x{grid_size} ===")
 
     # Load params
@@ -278,13 +413,9 @@ def convert_pt_to_creature(
             growth_sigma.append(float(sigma[out_ch, in_ch]))
             growth_weights.append(float(weights[out_ch, in_ch]))
 
-    # Dummy radii/widths (metadata only — not used by Rust simulation)
-    global_r = 10.0
-    radii = [0.25 + 0.6 * (k / num_kernels) for k in range(num_kernels)]
-    widths = [0.03 + 0.10 * (k / num_kernels) for k in range(num_kernels)]
-
-    # Generate seed
-    seed_channels = generate_seed_channels(grid_size, num_channels)
+    # Generate seed (fractal Perlin noise)
+    seed_channels = generate_seed_perlin(grid_size, num_channels)
+    print(f"  Seed: Perlin noise ({num_channels} channels)")
 
     # Save JSON config
     params_out = {
@@ -295,9 +426,6 @@ def convert_pt_to_creature(
         "growth_mu": growth_mu,
         "growth_sigma": growth_sigma,
         "growth_weights": growth_weights,
-        "global_r": global_r,
-        "radii": radii,
-        "widths": widths,
     }
     save_seed_json(seed_channels, params_out, grid_size, f"{output_dir}/seed/{name}.json")
 
@@ -324,6 +452,8 @@ def main() -> None:
                         help="Directory containing .pt files (default: demo_params)")
     parser.add_argument("--output-dir", type=str, default=".",
                         help="Output directory (default: current dir, creates seed/ and kernels/ subdirs)")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="Skip creatures that already have seed JSON and kernel bin files")
     args = parser.parse_args()
 
     if args.name:
@@ -332,7 +462,8 @@ def main() -> None:
         if not os.path.exists(pt_path):
             print(f"Error: {pt_path} not found")
             sys.exit(1)
-        convert_pt_to_creature(pt_path, args.grid_size, args.output_dir)
+        convert_pt_to_creature(pt_path, args.grid_size, args.output_dir,
+                                skip_existing=args.skip_existing)
 
     elif args.all:
         # Convert all .pt files
@@ -347,7 +478,8 @@ def main() -> None:
         success = 0
         for fname in pt_files:
             pt_path = os.path.join(args.demo_dir, fname)
-            result = convert_pt_to_creature(pt_path, args.grid_size, args.output_dir)
+            result = convert_pt_to_creature(pt_path, args.grid_size, args.output_dir,
+                                             skip_existing=args.skip_existing)
             if result is not None:
                 success += 1
         print(f"\n{'='*50}")

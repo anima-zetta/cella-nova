@@ -140,7 +140,7 @@ fn run_video(cli: Cli) {
     let (_context, game, grid_size) = setup_simulation(&cli);
 
     let total_frames = (cli.seconds as u64) * (cli.fps as u64);
-    let output_path = format!("{}/ml_output.mp4", cli.output);
+    let output_path = format!("{}/{}.mp4", cli.output, cli.creature);
     let output_dir = PathBuf::from(&cli.output);
 
     std::fs::create_dir_all(&output_dir).expect("Failed to create output directory");

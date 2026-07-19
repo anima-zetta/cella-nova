@@ -209,9 +209,6 @@ def save_seed_json(
         "growth_mu": mcl_params["growth_mu"],
         "growth_sigma": mcl_params["growth_sigma"],
         "growth_weights": mcl_params["growth_weights"],
-        "global_r": mcl_params["global_r"],
-        "radii": mcl_params["radii"],
-        "widths": mcl_params["widths"],
     }
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
