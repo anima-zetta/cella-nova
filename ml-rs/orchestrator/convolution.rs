@@ -681,11 +681,19 @@ impl ConvolutionPhase {
         // ================================================================
         // Step 3: For each kernel, copy FFT'd input channel to kernel's slot
         // Uses temp_buffer as intermediary (wgpu forbids same-buffer copy)
+        // MUST iterate in reverse to avoid overwriting source slots.
+        // E.g. with c0=[0,0,0,1,1,1,2,2,2], copying k=1 overwrites slot 1
+        // before k=4 can read it. Reverse order prevents this.
         // ================================================================
-        for k in 0..num_kernels {
+        for k in (0..num_kernels).rev() {
             let in_ch = c0[k] as usize;
             let src_offset = (in_ch as u64) * ch_complex_bytes;
             let dst_offset = (k as u64) * ch_complex_bytes;
+
+            // Skip no-op copies (src == dst)
+            if src_offset == dst_offset {
+                continue;
+            }
 
             // conv_buffer[src_offset] -> temp_buffer
             encoder.copy_buffer_to_buffer(

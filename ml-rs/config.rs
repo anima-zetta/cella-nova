@@ -31,7 +31,13 @@ pub struct SimConfig {
 /// Load a simulation config from a JSON file.
 pub fn load_config(path: &str) -> SimConfig {
     let data = std::fs::read_to_string(path).expect("Failed to read config file");
-    let config: SimConfig = serde_json::from_str(&data).expect("Failed to parse config JSON");
+    let mut config: SimConfig = serde_json::from_str(&data).expect("Failed to parse config JSON");
+    // Swap c0 and c1 to match Python's broadcasting convention.
+    // Python uses state[:,:,None] which aligns the state channel with out_ch
+    // instead of in_ch, so state[out_ch] is convolved with kernel[out_ch, in_ch].
+    // Rust uses state[c0[k]] with kernel[k] and groups by c1[k].
+    // Swapping c0/c1 makes Rust match Python's behavior.
+    std::mem::swap(&mut config.c0, &mut config.c1);
     println!("  Loaded config from {}", path);
     println!(
         "  {} channels, {} kernels, {}x{} grid",

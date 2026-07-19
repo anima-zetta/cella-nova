@@ -1,6 +1,6 @@
 // =============================================================================
 // compute_2048.wgsl — All compute shaders for the MaceLenia simulation.
-// 2048x2048 grid variant: 512 threads process 2048 elements per workgroup.
+// 2048x2048 grid variant: 256 threads process 2048 elements per workgroup.
 //
 // Each entry point uses unique (group=0, binding) pairs so they can coexist
 // in one module without conflicts.
@@ -8,7 +8,7 @@
 
 // ---------------------------------------------------------------------------
 // Stockham FFT: single-pass row/column using shared memory  (bindings 0, 2-3)
-// 512 threads cooperatively process 2048 elements entirely in workgroup memory.
+// 256 threads cooperatively process 2048 elements entirely in workgroup memory.
 // ---------------------------------------------------------------------------
 @group(0) @binding(0) var<storage, read_write> fft_data: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> twiddles: array<vec2<f32>>;
@@ -45,7 +45,7 @@ fn stockham_butterfly(stage: u32, t: u32, src: ptr<workgroup, array<vec2<f32>, 2
     (*dst)[src1] = even - odd;
 }
 
-@compute @workgroup_size(512)
+@compute @workgroup_size(256)
 fn fft_row_main(
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) wg_id: vec3<u32>
@@ -55,51 +55,81 @@ fn fft_row_main(
     let t = local_id.x;
 
     ping[bitrev_lut[t]]          = fft_data[base + t];
-    ping[bitrev_lut[t + 512u]]  = fft_data[base + t + 512u];
+    ping[bitrev_lut[t + 256u]]   = fft_data[base + t + 256u];
+    ping[bitrev_lut[t + 512u]]   = fft_data[base + t + 512u];
+    ping[bitrev_lut[t + 768u]]   = fft_data[base + t + 768u];
     ping[bitrev_lut[t + 1024u]]  = fft_data[base + t + 1024u];
+    ping[bitrev_lut[t + 1280u]]  = fft_data[base + t + 1280u];
     ping[bitrev_lut[t + 1536u]]  = fft_data[base + t + 1536u];
+    ping[bitrev_lut[t + 1792u]]  = fft_data[base + t + 1792u];
     workgroupBarrier();
 
     stockham_butterfly(0u, t, &ping, &pong);
+    stockham_butterfly(0u, t + 256u, &ping, &pong);
     stockham_butterfly(0u, t + 512u, &ping, &pong);
+    stockham_butterfly(0u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(1u, t, &pong, &ping);
+    stockham_butterfly(1u, t + 256u, &pong, &ping);
     stockham_butterfly(1u, t + 512u, &pong, &ping);
+    stockham_butterfly(1u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(2u, t, &ping, &pong);
+    stockham_butterfly(2u, t + 256u, &ping, &pong);
     stockham_butterfly(2u, t + 512u, &ping, &pong);
+    stockham_butterfly(2u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(3u, t, &pong, &ping);
+    stockham_butterfly(3u, t + 256u, &pong, &ping);
     stockham_butterfly(3u, t + 512u, &pong, &ping);
+    stockham_butterfly(3u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(4u, t, &ping, &pong);
+    stockham_butterfly(4u, t + 256u, &ping, &pong);
     stockham_butterfly(4u, t + 512u, &ping, &pong);
+    stockham_butterfly(4u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(5u, t, &pong, &ping);
+    stockham_butterfly(5u, t + 256u, &pong, &ping);
     stockham_butterfly(5u, t + 512u, &pong, &ping);
+    stockham_butterfly(5u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(6u, t, &ping, &pong);
+    stockham_butterfly(6u, t + 256u, &ping, &pong);
     stockham_butterfly(6u, t + 512u, &ping, &pong);
+    stockham_butterfly(6u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(7u, t, &pong, &ping);
+    stockham_butterfly(7u, t + 256u, &pong, &ping);
     stockham_butterfly(7u, t + 512u, &pong, &ping);
+    stockham_butterfly(7u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(8u, t, &ping, &pong);
+    stockham_butterfly(8u, t + 256u, &ping, &pong);
     stockham_butterfly(8u, t + 512u, &ping, &pong);
+    stockham_butterfly(8u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(9u, t, &pong, &ping);
+    stockham_butterfly(9u, t + 256u, &pong, &ping);
     stockham_butterfly(9u, t + 512u, &pong, &ping);
+    stockham_butterfly(9u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(10u, t, &ping, &pong);
+    stockham_butterfly(10u, t + 256u, &ping, &pong);
     stockham_butterfly(10u, t + 512u, &ping, &pong);
+    stockham_butterfly(10u, t + 768u, &ping, &pong);
 
     fft_data[base + t]          = pong[t];
+    fft_data[base + t + 256u]   = pong[t + 256u];
     fft_data[base + t + 512u]   = pong[t + 512u];
-    fft_data[base + t + 1024u]   = pong[t + 1024u];
-    fft_data[base + t + 1536u]   = pong[t + 1536u];
+    fft_data[base + t + 768u]   = pong[t + 768u];
+    fft_data[base + t + 1024u]  = pong[t + 1024u];
+    fft_data[base + t + 1280u]  = pong[t + 1280u];
+    fft_data[base + t + 1536u]  = pong[t + 1536u];
+    fft_data[base + t + 1792u]  = pong[t + 1792u];
 }
 
-@compute @workgroup_size(512)
+@compute @workgroup_size(256)
 fn fft_col_main(
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) wg_id: vec3<u32>
@@ -109,51 +139,81 @@ fn fft_col_main(
     let t = local_id.x;
 
     ping[bitrev_lut[t]]          = fft_data[t * w + col];
+    ping[bitrev_lut[t + 256u]]   = fft_data[(t + 256u) * w + col];
     ping[bitrev_lut[t + 512u]]   = fft_data[(t + 512u) * w + col];
-    ping[bitrev_lut[t + 1024u]]   = fft_data[(t + 1024u) * w + col];
-    ping[bitrev_lut[t + 1536u]]   = fft_data[(t + 1536u) * w + col];
+    ping[bitrev_lut[t + 768u]]   = fft_data[(t + 768u) * w + col];
+    ping[bitrev_lut[t + 1024u]]  = fft_data[(t + 1024u) * w + col];
+    ping[bitrev_lut[t + 1280u]]  = fft_data[(t + 1280u) * w + col];
+    ping[bitrev_lut[t + 1536u]]  = fft_data[(t + 1536u) * w + col];
+    ping[bitrev_lut[t + 1792u]]  = fft_data[(t + 1792u) * w + col];
     workgroupBarrier();
 
     stockham_butterfly(0u, t, &ping, &pong);
+    stockham_butterfly(0u, t + 256u, &ping, &pong);
     stockham_butterfly(0u, t + 512u, &ping, &pong);
+    stockham_butterfly(0u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(1u, t, &pong, &ping);
+    stockham_butterfly(1u, t + 256u, &pong, &ping);
     stockham_butterfly(1u, t + 512u, &pong, &ping);
+    stockham_butterfly(1u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(2u, t, &ping, &pong);
+    stockham_butterfly(2u, t + 256u, &ping, &pong);
     stockham_butterfly(2u, t + 512u, &ping, &pong);
+    stockham_butterfly(2u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(3u, t, &pong, &ping);
+    stockham_butterfly(3u, t + 256u, &pong, &ping);
     stockham_butterfly(3u, t + 512u, &pong, &ping);
+    stockham_butterfly(3u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(4u, t, &ping, &pong);
+    stockham_butterfly(4u, t + 256u, &ping, &pong);
     stockham_butterfly(4u, t + 512u, &ping, &pong);
+    stockham_butterfly(4u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(5u, t, &pong, &ping);
+    stockham_butterfly(5u, t + 256u, &pong, &ping);
     stockham_butterfly(5u, t + 512u, &pong, &ping);
+    stockham_butterfly(5u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(6u, t, &ping, &pong);
+    stockham_butterfly(6u, t + 256u, &ping, &pong);
     stockham_butterfly(6u, t + 512u, &ping, &pong);
+    stockham_butterfly(6u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(7u, t, &pong, &ping);
+    stockham_butterfly(7u, t + 256u, &pong, &ping);
     stockham_butterfly(7u, t + 512u, &pong, &ping);
+    stockham_butterfly(7u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(8u, t, &ping, &pong);
+    stockham_butterfly(8u, t + 256u, &ping, &pong);
     stockham_butterfly(8u, t + 512u, &ping, &pong);
+    stockham_butterfly(8u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(9u, t, &pong, &ping);
+    stockham_butterfly(9u, t + 256u, &pong, &ping);
     stockham_butterfly(9u, t + 512u, &pong, &ping);
+    stockham_butterfly(9u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(10u, t, &ping, &pong);
+    stockham_butterfly(10u, t + 256u, &ping, &pong);
     stockham_butterfly(10u, t + 512u, &ping, &pong);
+    stockham_butterfly(10u, t + 768u, &ping, &pong);
 
-    fft_data[t * w + col]              = pong[t];
-    fft_data[(t + 512u) * w + col]     = pong[t + 512u];
-    fft_data[(t + 1024u) * w + col]     = pong[t + 1024u];
-    fft_data[(t + 1536u) * w + col]     = pong[t + 1536u];
+    fft_data[t * w + col]          = pong[t];
+    fft_data[(t + 256u) * w + col] = pong[t + 256u];
+    fft_data[(t + 512u) * w + col] = pong[t + 512u];
+    fft_data[(t + 768u) * w + col] = pong[t + 768u];
+    fft_data[(t + 1024u) * w + col] = pong[t + 1024u];
+    fft_data[(t + 1280u) * w + col] = pong[t + 1280u];
+    fft_data[(t + 1536u) * w + col] = pong[t + 1536u];
+    fft_data[(t + 1792u) * w + col] = pong[t + 1792u];
 }
 
-@compute @workgroup_size(512)
+@compute @workgroup_size(256)
 fn ifft_row_main(
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) wg_id: vec3<u32>
@@ -163,51 +223,81 @@ fn ifft_row_main(
     let t = local_id.x;
 
     ping[bitrev_lut[t]]          = fft_data[base + t];
-    ping[bitrev_lut[t + 512u]]  = fft_data[base + t + 512u];
+    ping[bitrev_lut[t + 256u]]   = fft_data[base + t + 256u];
+    ping[bitrev_lut[t + 512u]]   = fft_data[base + t + 512u];
+    ping[bitrev_lut[t + 768u]]   = fft_data[base + t + 768u];
     ping[bitrev_lut[t + 1024u]]  = fft_data[base + t + 1024u];
+    ping[bitrev_lut[t + 1280u]]  = fft_data[base + t + 1280u];
     ping[bitrev_lut[t + 1536u]]  = fft_data[base + t + 1536u];
+    ping[bitrev_lut[t + 1792u]]  = fft_data[base + t + 1792u];
     workgroupBarrier();
 
     stockham_butterfly(0u, t, &ping, &pong);
+    stockham_butterfly(0u, t + 256u, &ping, &pong);
     stockham_butterfly(0u, t + 512u, &ping, &pong);
+    stockham_butterfly(0u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(1u, t, &pong, &ping);
+    stockham_butterfly(1u, t + 256u, &pong, &ping);
     stockham_butterfly(1u, t + 512u, &pong, &ping);
+    stockham_butterfly(1u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(2u, t, &ping, &pong);
+    stockham_butterfly(2u, t + 256u, &ping, &pong);
     stockham_butterfly(2u, t + 512u, &ping, &pong);
+    stockham_butterfly(2u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(3u, t, &pong, &ping);
+    stockham_butterfly(3u, t + 256u, &pong, &ping);
     stockham_butterfly(3u, t + 512u, &pong, &ping);
+    stockham_butterfly(3u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(4u, t, &ping, &pong);
+    stockham_butterfly(4u, t + 256u, &ping, &pong);
     stockham_butterfly(4u, t + 512u, &ping, &pong);
+    stockham_butterfly(4u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(5u, t, &pong, &ping);
+    stockham_butterfly(5u, t + 256u, &pong, &ping);
     stockham_butterfly(5u, t + 512u, &pong, &ping);
+    stockham_butterfly(5u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(6u, t, &ping, &pong);
+    stockham_butterfly(6u, t + 256u, &ping, &pong);
     stockham_butterfly(6u, t + 512u, &ping, &pong);
+    stockham_butterfly(6u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(7u, t, &pong, &ping);
+    stockham_butterfly(7u, t + 256u, &pong, &ping);
     stockham_butterfly(7u, t + 512u, &pong, &ping);
+    stockham_butterfly(7u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(8u, t, &ping, &pong);
+    stockham_butterfly(8u, t + 256u, &ping, &pong);
     stockham_butterfly(8u, t + 512u, &ping, &pong);
+    stockham_butterfly(8u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(9u, t, &pong, &ping);
+    stockham_butterfly(9u, t + 256u, &pong, &ping);
     stockham_butterfly(9u, t + 512u, &pong, &ping);
+    stockham_butterfly(9u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(10u, t, &ping, &pong);
+    stockham_butterfly(10u, t + 256u, &ping, &pong);
     stockham_butterfly(10u, t + 512u, &ping, &pong);
+    stockham_butterfly(10u, t + 768u, &ping, &pong);
 
     fft_data[base + t]          = pong[t];
+    fft_data[base + t + 256u]   = pong[t + 256u];
     fft_data[base + t + 512u]   = pong[t + 512u];
-    fft_data[base + t + 1024u]   = pong[t + 1024u];
-    fft_data[base + t + 1536u]   = pong[t + 1536u];
+    fft_data[base + t + 768u]   = pong[t + 768u];
+    fft_data[base + t + 1024u]  = pong[t + 1024u];
+    fft_data[base + t + 1280u]  = pong[t + 1280u];
+    fft_data[base + t + 1536u]  = pong[t + 1536u];
+    fft_data[base + t + 1792u]  = pong[t + 1792u];
 }
 
-@compute @workgroup_size(512)
+@compute @workgroup_size(256)
 fn ifft_col_main(
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) wg_id: vec3<u32>
@@ -217,52 +307,82 @@ fn ifft_col_main(
     let t = local_id.x;
 
     ping[bitrev_lut[t]]          = fft_data[t * w + col];
+    ping[bitrev_lut[t + 256u]]   = fft_data[(t + 256u) * w + col];
     ping[bitrev_lut[t + 512u]]   = fft_data[(t + 512u) * w + col];
-    ping[bitrev_lut[t + 1024u]]   = fft_data[(t + 1024u) * w + col];
-    ping[bitrev_lut[t + 1536u]]   = fft_data[(t + 1536u) * w + col];
+    ping[bitrev_lut[t + 768u]]   = fft_data[(t + 768u) * w + col];
+    ping[bitrev_lut[t + 1024u]]  = fft_data[(t + 1024u) * w + col];
+    ping[bitrev_lut[t + 1280u]]  = fft_data[(t + 1280u) * w + col];
+    ping[bitrev_lut[t + 1536u]]  = fft_data[(t + 1536u) * w + col];
+    ping[bitrev_lut[t + 1792u]]  = fft_data[(t + 1792u) * w + col];
     workgroupBarrier();
 
     stockham_butterfly(0u, t, &ping, &pong);
+    stockham_butterfly(0u, t + 256u, &ping, &pong);
     stockham_butterfly(0u, t + 512u, &ping, &pong);
+    stockham_butterfly(0u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(1u, t, &pong, &ping);
+    stockham_butterfly(1u, t + 256u, &pong, &ping);
     stockham_butterfly(1u, t + 512u, &pong, &ping);
+    stockham_butterfly(1u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(2u, t, &ping, &pong);
+    stockham_butterfly(2u, t + 256u, &ping, &pong);
     stockham_butterfly(2u, t + 512u, &ping, &pong);
+    stockham_butterfly(2u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(3u, t, &pong, &ping);
+    stockham_butterfly(3u, t + 256u, &pong, &ping);
     stockham_butterfly(3u, t + 512u, &pong, &ping);
+    stockham_butterfly(3u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(4u, t, &ping, &pong);
+    stockham_butterfly(4u, t + 256u, &ping, &pong);
     stockham_butterfly(4u, t + 512u, &ping, &pong);
+    stockham_butterfly(4u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(5u, t, &pong, &ping);
+    stockham_butterfly(5u, t + 256u, &pong, &ping);
     stockham_butterfly(5u, t + 512u, &pong, &ping);
+    stockham_butterfly(5u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(6u, t, &ping, &pong);
+    stockham_butterfly(6u, t + 256u, &ping, &pong);
     stockham_butterfly(6u, t + 512u, &ping, &pong);
+    stockham_butterfly(6u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(7u, t, &pong, &ping);
+    stockham_butterfly(7u, t + 256u, &pong, &ping);
     stockham_butterfly(7u, t + 512u, &pong, &ping);
+    stockham_butterfly(7u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(8u, t, &ping, &pong);
+    stockham_butterfly(8u, t + 256u, &ping, &pong);
     stockham_butterfly(8u, t + 512u, &ping, &pong);
+    stockham_butterfly(8u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(9u, t, &pong, &ping);
+    stockham_butterfly(9u, t + 256u, &pong, &ping);
     stockham_butterfly(9u, t + 512u, &pong, &ping);
+    stockham_butterfly(9u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(10u, t, &ping, &pong);
+    stockham_butterfly(10u, t + 256u, &ping, &pong);
     stockham_butterfly(10u, t + 512u, &ping, &pong);
+    stockham_butterfly(10u, t + 768u, &ping, &pong);
 
-    fft_data[t * w + col]              = pong[t];
-    fft_data[(t + 512u) * w + col]     = pong[t + 512u];
-    fft_data[(t + 1024u) * w + col]     = pong[t + 1024u];
-    fft_data[(t + 1536u) * w + col]     = pong[t + 1536u];
+    fft_data[t * w + col]          = pong[t];
+    fft_data[(t + 256u) * w + col] = pong[t + 256u];
+    fft_data[(t + 512u) * w + col] = pong[t + 512u];
+    fft_data[(t + 768u) * w + col] = pong[t + 768u];
+    fft_data[(t + 1024u) * w + col] = pong[t + 1024u];
+    fft_data[(t + 1280u) * w + col] = pong[t + 1280u];
+    fft_data[(t + 1536u) * w + col] = pong[t + 1536u];
+    fft_data[(t + 1792u) * w + col] = pong[t + 1792u];
 }
 
 // Fused complex multiply + IFFT column pass
-@compute @workgroup_size(512)
+@compute @workgroup_size(256)
 fn fused_cmul_ifft_col_main(
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) wg_id: vec3<u32>
@@ -271,55 +391,89 @@ fn fused_cmul_ifft_col_main(
     let w = fft_params.width;
     let t = local_id.x;
 
-    fft_data[t * w + col]              = complex_mul(fft_data[t * w + col], cm_kernel[t * w + col]);
-    fft_data[(t + 512u) * w + col]     = complex_mul(fft_data[(t + 512u) * w + col], cm_kernel[(t + 512u) * w + col]);
-    fft_data[(t + 1024u) * w + col]     = complex_mul(fft_data[(t + 1024u) * w + col], cm_kernel[(t + 1024u) * w + col]);
-    fft_data[(t + 1536u) * w + col]     = complex_mul(fft_data[(t + 1536u) * w + col], cm_kernel[(t + 1536u) * w + col]);
+    fft_data[t * w + col]          = complex_mul(fft_data[t * w + col], cm_kernel[t * w + col]);
+    fft_data[(t + 256u) * w + col] = complex_mul(fft_data[(t + 256u) * w + col], cm_kernel[(t + 256u) * w + col]);
+    fft_data[(t + 512u) * w + col] = complex_mul(fft_data[(t + 512u) * w + col], cm_kernel[(t + 512u) * w + col]);
+    fft_data[(t + 768u) * w + col] = complex_mul(fft_data[(t + 768u) * w + col], cm_kernel[(t + 768u) * w + col]);
+    fft_data[(t + 1024u) * w + col] = complex_mul(fft_data[(t + 1024u) * w + col], cm_kernel[(t + 1024u) * w + col]);
+    fft_data[(t + 1280u) * w + col] = complex_mul(fft_data[(t + 1280u) * w + col], cm_kernel[(t + 1280u) * w + col]);
+    fft_data[(t + 1536u) * w + col] = complex_mul(fft_data[(t + 1536u) * w + col], cm_kernel[(t + 1536u) * w + col]);
+    fft_data[(t + 1792u) * w + col] = complex_mul(fft_data[(t + 1792u) * w + col], cm_kernel[(t + 1792u) * w + col]);
     workgroupBarrier();
 
     ping[bitrev_lut[t]]          = fft_data[t * w + col];
-    ping[bitrev_lut[t + 512u]]  = fft_data[(t + 512u) * w + col];
+    ping[bitrev_lut[t + 256u]]   = fft_data[(t + 256u) * w + col];
+    ping[bitrev_lut[t + 512u]]   = fft_data[(t + 512u) * w + col];
+    ping[bitrev_lut[t + 768u]]   = fft_data[(t + 768u) * w + col];
     ping[bitrev_lut[t + 1024u]]  = fft_data[(t + 1024u) * w + col];
+    ping[bitrev_lut[t + 1280u]]  = fft_data[(t + 1280u) * w + col];
     ping[bitrev_lut[t + 1536u]]  = fft_data[(t + 1536u) * w + col];
+    ping[bitrev_lut[t + 1792u]]  = fft_data[(t + 1792u) * w + col];
     workgroupBarrier();
 
     stockham_butterfly(0u, t, &ping, &pong);
+    stockham_butterfly(0u, t + 256u, &ping, &pong);
     stockham_butterfly(0u, t + 512u, &ping, &pong);
+    stockham_butterfly(0u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(1u, t, &pong, &ping);
+    stockham_butterfly(1u, t + 256u, &pong, &ping);
     stockham_butterfly(1u, t + 512u, &pong, &ping);
+    stockham_butterfly(1u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(2u, t, &ping, &pong);
+    stockham_butterfly(2u, t + 256u, &ping, &pong);
     stockham_butterfly(2u, t + 512u, &ping, &pong);
+    stockham_butterfly(2u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(3u, t, &pong, &ping);
+    stockham_butterfly(3u, t + 256u, &pong, &ping);
     stockham_butterfly(3u, t + 512u, &pong, &ping);
+    stockham_butterfly(3u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(4u, t, &ping, &pong);
+    stockham_butterfly(4u, t + 256u, &ping, &pong);
     stockham_butterfly(4u, t + 512u, &ping, &pong);
+    stockham_butterfly(4u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(5u, t, &pong, &ping);
+    stockham_butterfly(5u, t + 256u, &pong, &ping);
     stockham_butterfly(5u, t + 512u, &pong, &ping);
+    stockham_butterfly(5u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(6u, t, &ping, &pong);
+    stockham_butterfly(6u, t + 256u, &ping, &pong);
     stockham_butterfly(6u, t + 512u, &ping, &pong);
+    stockham_butterfly(6u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(7u, t, &pong, &ping);
+    stockham_butterfly(7u, t + 256u, &pong, &ping);
     stockham_butterfly(7u, t + 512u, &pong, &ping);
+    stockham_butterfly(7u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(8u, t, &ping, &pong);
+    stockham_butterfly(8u, t + 256u, &ping, &pong);
     stockham_butterfly(8u, t + 512u, &ping, &pong);
+    stockham_butterfly(8u, t + 768u, &ping, &pong);
     workgroupBarrier();
     stockham_butterfly(9u, t, &pong, &ping);
+    stockham_butterfly(9u, t + 256u, &pong, &ping);
     stockham_butterfly(9u, t + 512u, &pong, &ping);
+    stockham_butterfly(9u, t + 768u, &pong, &ping);
     workgroupBarrier();
     stockham_butterfly(10u, t, &ping, &pong);
+    stockham_butterfly(10u, t + 256u, &ping, &pong);
     stockham_butterfly(10u, t + 512u, &ping, &pong);
+    stockham_butterfly(10u, t + 768u, &ping, &pong);
 
-    fft_data[t * w + col]              = pong[t];
-    fft_data[(t + 512u) * w + col]    = pong[t + 512u];
-    fft_data[(t + 1024u) * w + col]    = pong[t + 1024u];
-    fft_data[(t + 1536u) * w + col]    = pong[t + 1536u];
+    fft_data[t * w + col]          = pong[t];
+    fft_data[(t + 256u) * w + col] = pong[t + 256u];
+    fft_data[(t + 512u) * w + col] = pong[t + 512u];
+    fft_data[(t + 768u) * w + col] = pong[t + 768u];
+    fft_data[(t + 1024u) * w + col] = pong[t + 1024u];
+    fft_data[(t + 1280u) * w + col] = pong[t + 1280u];
+    fft_data[(t + 1536u) * w + col] = pong[t + 1536u];
+    fft_data[(t + 1792u) * w + col] = pong[t + 1792u];
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +482,7 @@ fn fused_cmul_ifft_col_main(
 @group(0) @binding(4) var<storage, read> ctc_channel: array<f32>;
 @group(0) @binding(5) var<storage, read_write> ctc_conv: array<vec2<f32>>;
 
-@compute @workgroup_size(512)
+@compute @workgroup_size(256)
 fn copy_to_conv_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let i: u32 = id.x;
     if (i >= arrayLength(&ctc_channel)) { return; }
@@ -341,7 +495,7 @@ fn copy_to_conv_main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(6) var<storage, read_write> cm_conv: array<vec2<f32>>;
 @group(0) @binding(7) var<storage, read> cm_kernel: array<vec2<f32>>;
 
-@compute @workgroup_size(512)
+@compute @workgroup_size(256)
 fn complex_mul_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let i: u32 = id.x;
     if (i >= arrayLength(&cm_conv)) { return; }
@@ -365,20 +519,17 @@ struct MclParams {
 @group(0) @binding(13) var<storage, read> mcl_c1: array<u32>;
 @group(0) @binding(14) var<uniform> mcl_params: MclParams;
 
-@compute @workgroup_size(512)
+@compute @workgroup_size(256)
 fn mcl_growth_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let p: u32 = id.x;
     let total_pixels: u32 = mcl_params.width * mcl_params.width;
     if (p >= total_pixels) { return; }
 
-    // Accumulate growth contribution for each output channel
-    // (max 16 channels supported)
     var dx: array<f32, 16>;
     for (var c: u32 = 0u; c < mcl_params.num_channels; c = c + 1u) {
         dx[c] = 0.0;
     }
 
-    // For each kernel: growth -> weighted sum
     for (var k: u32 = 0u; k < mcl_params.num_kernels; k = k + 1u) {
         let u_val: f32 = mcl_conv[k * total_pixels + p].x * mcl_params.norm_factor;
         let gp: vec2<f32> = mcl_growth_params[k];
@@ -407,7 +558,7 @@ struct DiffusionParams {
 @group(0) @binding(16) var<storage, read_write> diff_Z: array<f32>;
 @group(0) @binding(17) var<uniform> diff_params: DiffusionParams;
 
-@compute @workgroup_size(512)
+@compute @workgroup_size(256)
 fn diffusion_pass1_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let p: u32 = id.x;
     let w: u32 = diff_params.width;
@@ -420,7 +571,6 @@ fn diffusion_pass1_main(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var c: u32 = 0u; c < diff_params.num_channels; c = c + 1u) {
         let base: u32 = c * total_pixels;
 
-        // Compute Z = sum of aff_exp over 3x3 neighborhood
         var Z: f32 = 0.0;
         for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
             for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
@@ -432,7 +582,6 @@ fn diffusion_pass1_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
 
-        // Store Z to temp buffer (affinity buffer is NOT modified)
         diff_Z[base + p] = Z;
     }
 }
@@ -447,7 +596,7 @@ fn diffusion_pass1_main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(19) var<storage, read_write> diff2_new_channel: array<f32>;
 @group(0) @binding(17) var<uniform> diff2_params: DiffusionParams;
 
-@compute @workgroup_size(512)
+@compute @workgroup_size(256)
 fn diffusion_pass2_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let p: u32 = id.x;
     let w: u32 = diff2_params.width;
@@ -460,11 +609,9 @@ fn diffusion_pass2_main(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var c: u32 = 0u; c < diff2_params.num_channels; c = c + 1u) {
         let base: u32 = c * total_pixels;
 
-        // Recompute aff_exp from original affinity (not overwritten by pass 1)
         let a: f32 = diff2_affinity[base + p];
         let aff_exp: f32 = exp(diff2_params.temp * a);
 
-        // Sum state[n] / Z[n] over 3x3 neighborhood
         var sum: f32 = 0.0;
         for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
             for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
