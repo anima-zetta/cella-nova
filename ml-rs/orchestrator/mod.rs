@@ -84,7 +84,6 @@ impl GpuMaceLenia {
         mu: &[f32],
         sigma: &[f32],
         weights: &[f32],
-        dt: f32,
         temp: f32,
     ) -> Self {
         let device = &context.device;
@@ -145,7 +144,6 @@ impl GpuMaceLenia {
             mu,
             sigma,
             weights,
-            dt,
             &convolution.conv_buffer,
             &affinity_buffer,
         );

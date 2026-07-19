@@ -4,8 +4,6 @@ const N: usize = 64;
 const C: usize = 3;
 // Kernels
 const K: usize = C * C;
-// Time step
-const DT: f32 = 0.2;
 // Temperature
 const TEMP: f32 = 1.0;
 
@@ -362,6 +360,7 @@ fn generate_kernels_fft() -> [[[[f32; 2]; N]; N]; K] {
         // --- Step 1: build the spatial kernel ---
         // Each kernel is a ring: a Gaussian bump centred at a specific radius,
         // multiplied by a sigmoid envelope that smooths the inner edge.
+        let mut spatial = [[0.0f32; N]; N];
         for i in 0..N {
             for j in 0..N {
                 // Distance from centre of the grid.
@@ -526,7 +525,7 @@ fn save_ppm(channels: &[[[f32; N]; N]; C], path: &str) {
 fn main() {
     println!("=== MaceLenia (pure Rust, no GPU, no structs) ===");
     println!("Grid: {}×{}, Channels: {}, Kernels: {}", N, N, C, K);
-    println!("DT: {}, Temp: {}", DT, TEMP);
+    println!("Temp: {}", TEMP);
     println!();
 
     // Generate all parameters as plain arrays

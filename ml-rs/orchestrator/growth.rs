@@ -33,7 +33,6 @@ impl GrowthPhase {
         mu: &[f32],
         sigma: &[f32],
         weights: &[f32],
-        dt: f32,
         conv_buffer: &wgpu::Buffer,
         affinity_buffer: &wgpu::Buffer,
     ) -> Self {
@@ -82,7 +81,6 @@ impl GrowthPhase {
             width: u32,
             num_kernels: u32,
             num_channels: u32,
-            dt: f32,
             norm_factor: f32,
         }
 
@@ -101,7 +99,6 @@ impl GrowthPhase {
                 width,
                 num_kernels: num_kernels as u32,
                 num_channels: num_channels as u32,
-                dt,
                 norm_factor,
             }),
         );

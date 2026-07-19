@@ -310,7 +310,6 @@ struct MclParams {
     width: u32,
     num_kernels: u32,
     num_channels: u32,
-    dt: f32,
     norm_factor: f32,
 }
 

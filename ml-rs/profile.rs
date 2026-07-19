@@ -73,7 +73,6 @@ fn main() {
         &cfg.growth_mu,
         &cfg.growth_sigma,
         &cfg.growth_weights,
-        0.2,
         1.0,
     );
 

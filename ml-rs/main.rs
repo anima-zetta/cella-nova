@@ -27,10 +27,6 @@ struct Cli {
     #[arg(long, required = true)]
     creature: String,
 
-    /// Simulation time step
-    #[arg(long, default_value_t = 0.2)]
-    dt: f32,
-
     /// Video duration in seconds
     #[arg(long, default_value_t = 60)]
     seconds: u32,
@@ -102,7 +98,6 @@ fn setup_simulation(cli: &Cli) -> (Arc<WgpuContext>, GpuMaceLenia, usize) {
         &cfg.growth_mu,
         &cfg.growth_sigma,
         &cfg.growth_weights,
-        cli.dt,
         cli.temp,
     );
 
