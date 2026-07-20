@@ -18,8 +18,8 @@ os.makedirs("pngs", exist_ok=True)
 parser = argparse.ArgumentParser(description="Generate MaceLenia PNG frames (matching ml-rs)")
 parser.add_argument("--creature", type=str, default=None,
                     help="Creature name. Loads seed/{name}.json and kernels/{name}_{grid_size}.bin")
-parser.add_argument("--grid-size", type=int, default=64, choices=[64, 128, 256, 512],
-                    help="Grid size (default: 64, only used without --creature)")
+parser.add_argument("--grid-size", type=int, default=1024, choices=[1024, 2048],
+                    help="Grid size (default: 1024, only used without --creature)")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------

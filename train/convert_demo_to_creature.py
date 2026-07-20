@@ -13,7 +13,7 @@ For each .pt file in demo_params/, this script:
 
 Usage:
   python3 train/convert_demo_to_creature.py
-  python3 train/convert_demo_to_creature.py --grid-size 256
+  python3 train/convert_demo_to_creature.py --grid-size 1024
   python3 train/convert_demo_to_creature.py --name "abbreviated_nonworker"
   python3 train/convert_demo_to_creature.py --all
 """
@@ -441,9 +441,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert demo_params/*.pt to MaceLenia creatures"
     )
-    parser.add_argument("--grid-size", type=int, default=512,
-                        choices=[64, 128, 256, 512, 1024, 2048],
-                        help="Grid size (default: 512)")
+    parser.add_argument("--grid-size", type=int, default=1024,
+                        choices=[1024, 2048],
+                        help="Grid size (default: 1024)")
     parser.add_argument("--name", type=str, default=None,
                         help="Convert a single .pt file by name (without .pt extension)")
     parser.add_argument("--all", action="store_true",

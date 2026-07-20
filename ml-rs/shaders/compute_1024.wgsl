@@ -7,8 +7,10 @@
 // =============================================================================
 
 // ---------------------------------------------------------------------------
-// Stockham FFT: single-pass row/column using shared memory  (bindings 0, 2-3)
-// 256 threads cooperatively process 1024 elements entirely in workgroup memory.
+// Cooley-Tukey DIT FFT: uses only 256 elements of workgroup memory.
+// Stages 0-7 (distance 1..128) run in workgroup memory per 256-element slice.
+// Stages 8-9 (distance 256..512) run in registers (same-thread pairs).
+// 256 threads process 1024 elements (4 per thread, strided by 256).
 // ---------------------------------------------------------------------------
 @group(0) @binding(0) var<storage, read_write> fft_data: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> twiddles: array<vec2<f32>>;
@@ -19,8 +21,7 @@ struct FftParams { width: u32, inverse: u32 }
 // Precomputed bit-reversal permutation, uploaded once by the host.
 @group(0) @binding(41) var<storage, read> bitrev_lut: array<u32>;
 
-var<workgroup> ping: array<vec2<f32>, 1024>;
-var<workgroup> pong: array<vec2<f32>, 1024>;
+var<workgroup> wg_data: array<vec2<f32>, 256>;
 
 fn complex_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
@@ -32,17 +33,80 @@ fn load_twiddle(stage: u32, k: u32) -> vec2<f32> {
     return select(w, vec2<f32>(w.x, -w.y), fft_params.inverse == 1u);
 }
 
-fn stockham_butterfly(stage: u32, t: u32, src: ptr<workgroup, array<vec2<f32>, 1024>>, dst: ptr<workgroup, array<vec2<f32>, 1024>>) {
-    let R = 1u << stage;
-    let b = t / R;
-    let k = t % R;
-    let src0 = b * 2u * R + k;
-    let src1 = src0 + R;
-    let w = load_twiddle(stage, k);
-    let even = (*src)[src0];
-    let odd = complex_mul(w, (*src)[src1]);
-    (*dst)[src0] = even + odd;
-    (*dst)[src1] = even - odd;
+/// Run DIT stages 0-7 on a 256-element slice in workgroup memory.
+/// After this, the slice is in normal order (stages 0-7 complete).
+fn dit_stages_0_7(tid: u32) {
+    for (var s = 0u; s < 8u; s++) {
+        let dist = 1u << s;
+        let pair = tid ^ dist;
+        if (tid < pair) {
+            let w = load_twiddle(s, tid & (dist - 1u));
+            let even = wg_data[tid];
+            let odd = wg_data[pair];
+            wg_data[tid] = even + complex_mul(odd, w);
+            wg_data[pair] = even - complex_mul(odd, w);
+        }
+        workgroupBarrier();
+    }
+}
+
+/// Run DIT stages 8-9 on 4 elements in registers (indices 0..3).
+/// Pairs: (0,1),(2,3) for s=8, (0,2),(1,3) for s=9.
+fn dit_stages_8_9(reg: ptr<function, array<vec2<f32>, 4>>, t: u32) {
+    // Stage 8: distance 256, pairs (0,1), (2,3)
+    // All pairs use the same twiddle W_{512}^t (k = t for all groups)
+    let w8 = load_twiddle(8u, t);
+    for (var i = 0u; i < 4u; i += 2u) {
+        let even = (*reg)[i];
+        let odd = (*reg)[i + 1u];
+        (*reg)[i] = even + complex_mul(odd, w8);
+        (*reg)[i + 1u] = even - complex_mul(odd, w8);
+    }
+    // Stage 9: distance 512, pairs (0,2), (1,3)
+    let w9_0 = load_twiddle(9u, t);
+    let w9_1 = load_twiddle(9u, t + 256u);
+    // Pair (0,2)
+    let even0 = (*reg)[0];
+    let odd0 = (*reg)[2];
+    (*reg)[0] = even0 + complex_mul(odd0, w9_0);
+    (*reg)[2] = even0 - complex_mul(odd0, w9_0);
+    // Pair (1,3)
+    let even1 = (*reg)[1];
+    let odd1 = (*reg)[3];
+    (*reg)[1] = even1 + complex_mul(odd1, w9_1);
+    (*reg)[3] = even1 - complex_mul(odd1, w9_1);
+}
+
+/// Load 4 strided elements into registers with bit-reversal.
+fn load_regs_row(base: u32, t: u32, reg: ptr<function, array<vec2<f32>, 4>>) {
+    (*reg)[0] = fft_data[base + bitrev_lut[t]];
+    (*reg)[1] = fft_data[base + bitrev_lut[t + 256u]];
+    (*reg)[2] = fft_data[base + bitrev_lut[t + 512u]];
+    (*reg)[3] = fft_data[base + bitrev_lut[t + 768u]];
+}
+
+/// Store 4 strided elements from registers (normal order).
+fn store_regs_row(base: u32, t: u32, reg: array<vec2<f32>, 4>) {
+    fft_data[base + t]          = reg[0];
+    fft_data[base + t + 256u]   = reg[1];
+    fft_data[base + t + 512u]   = reg[2];
+    fft_data[base + t + 768u]   = reg[3];
+}
+
+/// Load 4 strided column elements into registers with bit-reversal.
+fn load_regs_col(w: u32, col: u32, t: u32, reg: ptr<function, array<vec2<f32>, 4>>) {
+    (*reg)[0] = fft_data[bitrev_lut[t] * w + col];
+    (*reg)[1] = fft_data[bitrev_lut[t + 256u] * w + col];
+    (*reg)[2] = fft_data[bitrev_lut[t + 512u] * w + col];
+    (*reg)[3] = fft_data[bitrev_lut[t + 768u] * w + col];
+}
+
+/// Store 4 strided column elements from registers (normal order).
+fn store_regs_col(w: u32, col: u32, t: u32, reg: array<vec2<f32>, 4>) {
+    fft_data[t * w + col]          = reg[0];
+    fft_data[(t + 256u) * w + col] = reg[1];
+    fft_data[(t + 512u) * w + col] = reg[2];
+    fft_data[(t + 768u) * w + col] = reg[3];
 }
 
 @compute @workgroup_size(256)
@@ -54,46 +118,22 @@ fn fft_row_main(
     let base = row * fft_params.width;
     let t = local_id.x;
 
-    ping[bitrev_lut[t]]          = fft_data[base + t];
-    ping[bitrev_lut[t + 256u]]  = fft_data[base + t + 256u];
-    ping[bitrev_lut[t + 512u]]  = fft_data[base + t + 512u];
-    ping[bitrev_lut[t + 768u]]  = fft_data[base + t + 768u];
-    workgroupBarrier();
+    var reg: array<vec2<f32>, 4>;
+    load_regs_row(base, t, &reg);
 
-    stockham_butterfly(0u, t, &ping, &pong);
-    stockham_butterfly(0u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(1u, t, &pong, &ping);
-    stockham_butterfly(1u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(2u, t, &ping, &pong);
-    stockham_butterfly(2u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(3u, t, &pong, &ping);
-    stockham_butterfly(3u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(4u, t, &ping, &pong);
-    stockham_butterfly(4u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping);
-    stockham_butterfly(5u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong);
-    stockham_butterfly(6u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping);
-    stockham_butterfly(7u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(8u, t, &ping, &pong);
-    stockham_butterfly(8u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(9u, t, &pong, &ping);
-    stockham_butterfly(9u, t + 256u, &pong, &ping);
+    // Stages 0-7: process each 256-element slice in workgroup memory
+    for (var slice = 0u; slice < 4u; slice++) {
+        wg_data[t] = reg[slice];
+        workgroupBarrier();
+        dit_stages_0_7(t);
+        reg[slice] = wg_data[t];
+        workgroupBarrier();
+    }
 
-    fft_data[base + t]          = ping[t];
-    fft_data[base + t + 256u]   = ping[t + 256u];
-    fft_data[base + t + 512u]   = ping[t + 512u];
-    fft_data[base + t + 768u]   = ping[t + 768u];
+    // Stages 8-9: in registers
+    dit_stages_8_9(&reg, t);
+
+    store_regs_row(base, t, reg);
 }
 
 @compute @workgroup_size(256)
@@ -105,46 +145,22 @@ fn fft_col_main(
     let w = fft_params.width;
     let t = local_id.x;
 
-    ping[bitrev_lut[t]]          = fft_data[t * w + col];
-    ping[bitrev_lut[t + 256u]]   = fft_data[(t + 256u) * w + col];
-    ping[bitrev_lut[t + 512u]]   = fft_data[(t + 512u) * w + col];
-    ping[bitrev_lut[t + 768u]]   = fft_data[(t + 768u) * w + col];
-    workgroupBarrier();
+    var reg: array<vec2<f32>, 4>;
+    load_regs_col(w, col, t, &reg);
 
-    stockham_butterfly(0u, t, &ping, &pong);
-    stockham_butterfly(0u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(1u, t, &pong, &ping);
-    stockham_butterfly(1u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(2u, t, &ping, &pong);
-    stockham_butterfly(2u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(3u, t, &pong, &ping);
-    stockham_butterfly(3u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(4u, t, &ping, &pong);
-    stockham_butterfly(4u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping);
-    stockham_butterfly(5u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong);
-    stockham_butterfly(6u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping);
-    stockham_butterfly(7u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(8u, t, &ping, &pong);
-    stockham_butterfly(8u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(9u, t, &pong, &ping);
-    stockham_butterfly(9u, t + 256u, &pong, &ping);
+    // Stages 0-7: process each 256-element slice in workgroup memory
+    for (var slice = 0u; slice < 4u; slice++) {
+        wg_data[t] = reg[slice];
+        workgroupBarrier();
+        dit_stages_0_7(t);
+        reg[slice] = wg_data[t];
+        workgroupBarrier();
+    }
 
-    fft_data[t * w + col]              = ping[t];
-    fft_data[(t + 256u) * w + col]     = ping[t + 256u];
-    fft_data[(t + 512u) * w + col]     = ping[t + 512u];
-    fft_data[(t + 768u) * w + col]     = ping[t + 768u];
+    // Stages 8-9: in registers
+    dit_stages_8_9(&reg, t);
+
+    store_regs_col(w, col, t, reg);
 }
 
 @compute @workgroup_size(256)
@@ -156,46 +172,22 @@ fn ifft_row_main(
     let base = row * fft_params.width;
     let t = local_id.x;
 
-    ping[bitrev_lut[t]]          = fft_data[base + t];
-    ping[bitrev_lut[t + 256u]]  = fft_data[base + t + 256u];
-    ping[bitrev_lut[t + 512u]]  = fft_data[base + t + 512u];
-    ping[bitrev_lut[t + 768u]]  = fft_data[base + t + 768u];
-    workgroupBarrier();
+    var reg: array<vec2<f32>, 4>;
+    load_regs_row(base, t, &reg);
 
-    stockham_butterfly(0u, t, &ping, &pong);
-    stockham_butterfly(0u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(1u, t, &pong, &ping);
-    stockham_butterfly(1u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(2u, t, &ping, &pong);
-    stockham_butterfly(2u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(3u, t, &pong, &ping);
-    stockham_butterfly(3u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(4u, t, &ping, &pong);
-    stockham_butterfly(4u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping);
-    stockham_butterfly(5u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong);
-    stockham_butterfly(6u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping);
-    stockham_butterfly(7u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(8u, t, &ping, &pong);
-    stockham_butterfly(8u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(9u, t, &pong, &ping);
-    stockham_butterfly(9u, t + 256u, &pong, &ping);
+    // Stages 0-7: process each 256-element slice in workgroup memory
+    for (var slice = 0u; slice < 4u; slice++) {
+        wg_data[t] = reg[slice];
+        workgroupBarrier();
+        dit_stages_0_7(t);
+        reg[slice] = wg_data[t];
+        workgroupBarrier();
+    }
 
-    fft_data[base + t]          = ping[t];
-    fft_data[base + t + 256u]   = ping[t + 256u];
-    fft_data[base + t + 512u]   = ping[t + 512u];
-    fft_data[base + t + 768u]   = ping[t + 768u];
+    // Stages 8-9: in registers
+    dit_stages_8_9(&reg, t);
+
+    store_regs_row(base, t, reg);
 }
 
 @compute @workgroup_size(256)
@@ -207,46 +199,22 @@ fn ifft_col_main(
     let w = fft_params.width;
     let t = local_id.x;
 
-    ping[bitrev_lut[t]]          = fft_data[t * w + col];
-    ping[bitrev_lut[t + 256u]]   = fft_data[(t + 256u) * w + col];
-    ping[bitrev_lut[t + 512u]]   = fft_data[(t + 512u) * w + col];
-    ping[bitrev_lut[t + 768u]]   = fft_data[(t + 768u) * w + col];
-    workgroupBarrier();
+    var reg: array<vec2<f32>, 4>;
+    load_regs_col(w, col, t, &reg);
 
-    stockham_butterfly(0u, t, &ping, &pong);
-    stockham_butterfly(0u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(1u, t, &pong, &ping);
-    stockham_butterfly(1u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(2u, t, &ping, &pong);
-    stockham_butterfly(2u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(3u, t, &pong, &ping);
-    stockham_butterfly(3u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(4u, t, &ping, &pong);
-    stockham_butterfly(4u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping);
-    stockham_butterfly(5u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong);
-    stockham_butterfly(6u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping);
-    stockham_butterfly(7u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(8u, t, &ping, &pong);
-    stockham_butterfly(8u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(9u, t, &pong, &ping);
-    stockham_butterfly(9u, t + 256u, &pong, &ping);
+    // Stages 0-7: process each 256-element slice in workgroup memory
+    for (var slice = 0u; slice < 4u; slice++) {
+        wg_data[t] = reg[slice];
+        workgroupBarrier();
+        dit_stages_0_7(t);
+        reg[slice] = wg_data[t];
+        workgroupBarrier();
+    }
 
-    fft_data[t * w + col]              = ping[t];
-    fft_data[(t + 256u) * w + col]     = ping[t + 256u];
-    fft_data[(t + 512u) * w + col]     = ping[t + 512u];
-    fft_data[(t + 768u) * w + col]     = ping[t + 768u];
+    // Stages 8-9: in registers
+    dit_stages_8_9(&reg, t);
+
+    store_regs_col(w, col, t, reg);
 }
 
 // Fused complex multiply + IFFT column pass
@@ -259,52 +227,30 @@ fn fused_cmul_ifft_col_main(
     let w = fft_params.width;
     let t = local_id.x;
 
-    fft_data[t * w + col]              = complex_mul(fft_data[t * w + col], cm_kernel[t * w + col]);
-    fft_data[(t + 256u) * w + col]     = complex_mul(fft_data[(t + 256u) * w + col], cm_kernel[(t + 256u) * w + col]);
-    fft_data[(t + 512u) * w + col]     = complex_mul(fft_data[(t + 512u) * w + col], cm_kernel[(t + 512u) * w + col]);
-    fft_data[(t + 768u) * w + col]     = complex_mul(fft_data[(t + 768u) * w + col], cm_kernel[(t + 768u) * w + col]);
-    workgroupBarrier();
+    var reg: array<vec2<f32>, 4>;
+    // Load + complex multiply + bit-reverse in one step
+    reg[0] = complex_mul(fft_data[bitrev_lut[t] * w + col], cm_kernel[bitrev_lut[t] * w + col]);
+    reg[1] = complex_mul(fft_data[bitrev_lut[t + 256u] * w + col], cm_kernel[bitrev_lut[t + 256u] * w + col]);
+    reg[2] = complex_mul(fft_data[bitrev_lut[t + 512u] * w + col], cm_kernel[bitrev_lut[t + 512u] * w + col]);
+    reg[3] = complex_mul(fft_data[bitrev_lut[t + 768u] * w + col], cm_kernel[bitrev_lut[t + 768u] * w + col]);
 
-    ping[bitrev_lut[t]]          = fft_data[t * w + col];
-    ping[bitrev_lut[t + 256u]]  = fft_data[(t + 256u) * w + col];
-    ping[bitrev_lut[t + 512u]]  = fft_data[(t + 512u) * w + col];
-    ping[bitrev_lut[t + 768u]]  = fft_data[(t + 768u) * w + col];
-    workgroupBarrier();
+    // Stages 0-7: process each 256-element slice in workgroup memory
+    for (var slice = 0u; slice < 4u; slice++) {
+        wg_data[t] = reg[slice];
+        workgroupBarrier();
+        dit_stages_0_7(t);
+        reg[slice] = wg_data[t];
+        workgroupBarrier();
+    }
 
-    stockham_butterfly(0u, t, &ping, &pong);
-    stockham_butterfly(0u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(1u, t, &pong, &ping);
-    stockham_butterfly(1u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(2u, t, &ping, &pong);
-    stockham_butterfly(2u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(3u, t, &pong, &ping);
-    stockham_butterfly(3u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(4u, t, &ping, &pong);
-    stockham_butterfly(4u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(5u, t, &pong, &ping);
-    stockham_butterfly(5u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(6u, t, &ping, &pong);
-    stockham_butterfly(6u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(7u, t, &pong, &ping);
-    stockham_butterfly(7u, t + 256u, &pong, &ping);
-    workgroupBarrier();
-    stockham_butterfly(8u, t, &ping, &pong);
-    stockham_butterfly(8u, t + 256u, &ping, &pong);
-    workgroupBarrier();
-    stockham_butterfly(9u, t, &pong, &ping);
-    stockham_butterfly(9u, t + 256u, &pong, &ping);
+    // Stages 8-9: in registers
+    dit_stages_8_9(&reg, t);
 
-    fft_data[t * w + col]              = ping[t];
-    fft_data[(t + 256u) * w + col]    = ping[t + 256u];
-    fft_data[(t + 512u) * w + col]    = ping[t + 512u];
-    fft_data[(t + 768u) * w + col]    = ping[t + 768u];
+    // Store back (normal order)
+    fft_data[t * w + col]          = reg[0];
+    fft_data[(t + 256u) * w + col] = reg[1];
+    fft_data[(t + 512u) * w + col] = reg[2];
+    fft_data[(t + 768u) * w + col] = reg[3];
 }
 
 // ---------------------------------------------------------------------------

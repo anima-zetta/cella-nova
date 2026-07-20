@@ -1,5 +1,5 @@
 // Grid size (must be a power of two).
-const N: usize = 64;
+const N: usize = 1024;
 // Channels
 const C: usize = 3;
 // Kernels
