@@ -18,10 +18,6 @@ name = "ml-rs-save-pngs"
 path = "ml-rs/save_pngs.rs"
 
 [[bin]]
-name = "ml-rs-debug-fft"
-path = "ml-rs/debug_fft.rs"
-
-[[bin]]
 name = "ml-rs-example"
 path = "ml-rs/example.rs"
 

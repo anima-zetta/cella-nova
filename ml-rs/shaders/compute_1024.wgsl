@@ -465,3 +465,33 @@ fn diffusion_pass2_main(@builtin(global_invocation_id) id: vec3<u32>) {
         diff2_new_channel[base + p] = aff_exp * sum;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Render: channel data → packed RGB  (bindings 20-22)
+// ---------------------------------------------------------------------------
+@group(0) @binding(20) var<storage, read> render_channels: array<f32>;
+@group(0) @binding(21) var<storage, read_write> render_output: array<u32>;
+
+struct RenderParams {
+    width: u32,
+    num_channels: u32,
+}
+
+@group(0) @binding(22) var<uniform> render_params: RenderParams;
+
+@compute @workgroup_size(256)
+fn render_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let total = render_params.width * render_params.width;
+    if (idx >= total) { return; }
+
+    let c0 = render_channels[idx];
+    let c1 = render_channels[total + idx];
+    let c2 = render_channels[2u * total + idx];
+
+    let r = u32(sqrt(clamp(c0 * 1.5, 0.0, 1.0)) * 255.0);
+    let g = u32(sqrt(clamp(c1 * 1.5, 0.0, 1.0)) * 255.0);
+    let b = u32(sqrt(clamp(c2 * 1.5, 0.0, 1.0)) * 255.0);
+
+    render_output[idx] = (r << 16u) | (g << 8u) | b;
+}

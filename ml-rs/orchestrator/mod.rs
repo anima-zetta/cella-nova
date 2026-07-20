@@ -13,11 +13,13 @@
 mod convolution;
 mod diffusion;
 mod growth;
+mod render;
 
 use crate::wfft::WgpuContext;
 use convolution::ConvolutionPhase;
 use diffusion::DiffusionPhase;
 use growth::GrowthPhase;
+use render::RenderPhase;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -66,11 +68,14 @@ pub struct GpuMaceLenia {
     z_buffer: wgpu::Buffer,
     /// All kernels FFT'd: [K * H * W] vec2<f32>
     kernel_buffer: wgpu::Buffer,
+    /// Render output: [H * W] packed u32 RGB (0x00RRGGBB)
+    render_buffer: wgpu::Buffer,
 
     // --- Phase sub-structs ---
     convolution: ConvolutionPhase,
     growth: GrowthPhase,
     diffusion: DiffusionPhase,
+    render_phase: RenderPhase,
 }
 
 impl GpuMaceLenia {
@@ -113,6 +118,9 @@ impl GpuMaceLenia {
 
         let k_size = (total_elements * num_kernels * 8) as u64;
         let kernel_buffer = make_storage("ml::kernel", k_size);
+
+        let render_size = (total_elements * 4) as u64; // u32 per pixel
+        let render_buffer = make_storage("ml::render", render_size);
 
         let conv_size = (total_elements * num_kernels * 8) as u64;
         let conv_buffer = make_storage("ml::conv", conv_size);
@@ -162,6 +170,16 @@ impl GpuMaceLenia {
             &new_channel_buffer,
         );
 
+        let render_phase = RenderPhase::new(
+            device,
+            queue,
+            compute_shader,
+            shape,
+            num_channels,
+            &channel_buffer,
+            &render_buffer,
+        );
+
         GpuMaceLenia {
             context,
             shape: shape.to_vec(),
@@ -175,9 +193,11 @@ impl GpuMaceLenia {
             affinity_buffer,
             z_buffer,
             kernel_buffer,
+            render_buffer,
             convolution,
             growth,
             diffusion,
+            render_phase,
         }
     }
 
@@ -282,6 +302,42 @@ impl GpuMaceLenia {
         result
     }
 
+    /// Download the render buffer and convert to RGB24 bytes (ready for ffmpeg).
+    pub fn download_render(&self) -> Vec<u8> {
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+        let total_bytes = (self.total_elements * 4) as u64; // u32 per pixel
+
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ml::readback_render"),
+            size: total_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ml::download_render"),
+        });
+        encoder.copy_buffer_to_buffer(&self.render_buffer, 0, &readback, 0, total_bytes);
+        queue.submit(Some(encoder.finish()));
+
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
+        let view = slice.get_mapped_range();
+        let packed: &[u32] = bytemuck::cast_slice(&view);
+        // Convert packed u32 (0x00RRGGBB) → RGB24 bytes
+        let mut pixels = Vec::with_capacity(self.total_elements * 3);
+        for &p in packed {
+            pixels.push((p >> 16) as u8);
+            pixels.push((p >> 8) as u8);
+            pixels.push(p as u8);
+        }
+        drop(view);
+        readback.unmap();
+        pixels
+    }
+
     // =======================================================================
     // Main iteration
     // =======================================================================
@@ -329,6 +385,51 @@ impl GpuMaceLenia {
             0,
             (self.total_elements * self.num_channels * 4) as u64,
         );
+
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Performs a single iteration + GPU render in one command submission.
+    /// This avoids an extra GPU sync compared to calling iterate() then render() separately.
+    pub fn iterate_and_render(&self) {
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+        let total = self.total_elements as u32;
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ml::iterate_and_render"),
+        });
+
+        // Phase 1: FFT convolution
+        self.convolution.run(
+            device,
+            &mut encoder,
+            &self.channel_buffer,
+            &self.kernel_buffer,
+            &self.c0,
+            self.num_kernels,
+            self.num_channels,
+            self.total_elements,
+            &self.shape,
+        );
+
+        // Phase 2: Growth + weighted sum → affinity buffer
+        self.growth.run(&mut encoder, total);
+
+        // Phase 3: Diffusion
+        self.diffusion.run(&mut encoder, total);
+
+        // Phase 4: Copy new_channel → channel
+        encoder.copy_buffer_to_buffer(
+            &self.new_channel_buffer,
+            0,
+            &self.channel_buffer,
+            0,
+            (self.total_elements * self.num_channels * 4) as u64,
+        );
+
+        // Phase 5: Render channels → packed RGB
+        self.render_phase.run(&mut encoder, total);
 
         queue.submit(Some(encoder.finish()));
     }

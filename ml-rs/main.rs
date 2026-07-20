@@ -179,7 +179,7 @@ fn run_video(cli: Cli) {
     let mut stdin = ffmpeg.stdin.take().expect("Failed to open ffmpeg stdin");
 
     for step in 0..total_frames {
-        game.iterate();
+        game.iterate_and_render();
 
         if step % cli.fps as u64 == 0 {
             let elapsed_secs = step / cli.fps as u64;
@@ -193,27 +193,8 @@ fn run_video(cli: Cli) {
             std::io::stdout().flush().unwrap();
         }
 
-        let data = game.download_all_channels();
-
-        // Map channels to RGB:
-        //   c0 -> R, c1 -> G, c2 -> B
-        //   color = clamp(channel * 1.5, 0, 1), then gamma = sqrt(color)
-        let mut pixels = vec![0u8; shape * shape * 3];
-        for i in 0..shape {
-            for j in 0..shape {
-                let idx = i * shape + j;
-                let c0 = data[0 * shape * shape + idx];
-                let c1 = data[1 * shape * shape + idx];
-                let c2 = data[2 * shape * shape + idx];
-                let r = (c0 * 1.5).clamp(0.0, 1.0).sqrt();
-                let g = (c1 * 1.5).clamp(0.0, 1.0).sqrt();
-                let b = (c2 * 1.5).clamp(0.0, 1.0).sqrt();
-                let p = idx * 3;
-                pixels[p] = (r * 255.0) as u8;
-                pixels[p + 1] = (g * 255.0) as u8;
-                pixels[p + 2] = (b * 255.0) as u8;
-            }
-        }
+        // Download pre-rendered RGB24 pixels directly from GPU
+        let pixels = game.download_render();
 
         // Write raw RGB frame to ffmpeg stdin
         use std::io::Write;
