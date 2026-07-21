@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-GRID_SIZES=(2048)
+GRID_SIZES=(1024 2048)
 PASS=0
 FAIL=0
 
