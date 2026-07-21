@@ -198,6 +198,12 @@ fn main() {
         let output_path = format!("{}/{}.mp4", cli.output, creature);
         let output_dir = PathBuf::from(&cli.output);
 
+        // Skip if video already exists
+        if std::path::Path::new(&output_path).exists() {
+            println!("  Video already exists, skipping.");
+            continue;
+        }
+
         std::fs::create_dir_all(&output_dir).expect("Failed to create output directory");
 
         println!(
