@@ -1,24 +1,20 @@
-# Flow Lenia — GPU-Accelerated Mass-Conserving CA 🌊
+# MaceLenia — GPU-Accelerated DiffusionLenia CA 🧬
 
-A GPU-accelerated **Flow Lenia** simulation in Rust (wgpu/Metal) with a PyTorch training pipeline. Flow Lenia is a mass-conserving variant of Lenia that uses Sobel gradients and semi-Lagrangian advection instead of the classic growth-and-clamp dynamics.
+A GPU-accelerated **DiffusionLenia** (mass-conserving multi-channel Lenia) simulation in Rust (wgpu/Metal) with a Python creature-generation pipeline. DiffusionLenia replaces the classic growth-and-clamp dynamics with a mass-conserving diffusion step — mass is redistributed rather than created or destroyed.
 
 ## Architecture
 
 ```
-┌───────────────────────┐     ┌────────────────────────┐
-│  train/train_lenia.py │     │  src/main.rs           │
-│  (PyTorch training)   │────▶│  (wgpu GPU simulation) │
-│                       │     │                        │
-│  Trains kernel FFT    │     │  Loads trained kernels │
-│  weights via SGD to   │     │  via --load-kernels    │
-│  move a glider seed   │     │                        │
-│  toward a target      │     │  Real-time rendering   │
-└───────────────────────┘     └────────────────────────┘
-         │                            │
-         └──────────┬─────────────────┘
-                    ▼
-         seed/glider.json
-         (shared seed config)
+┌──────────────────────────────┐     ┌────────────────────────────┐
+│  train/generate_kernel_json  │     │  ml-rs/main.rs             │
+│  (Python creature generator) │────▶│  (wgpu GPU simulation)     │
+│                              │     │                            │
+│  Generates FFT kernels +     │     │  Loads seed/{name}.json    │
+│  seed config for each        │     │  and kernels/{name}.bin    │
+│  creature                    │     │                            │
+└──────────────────────────────┘     │  Headless video generation │
+                                     │  via ffmpeg pipe           │
+                                     └────────────────────────────┘
 ```
 
 ## Quick Start
@@ -26,101 +22,147 @@ A GPU-accelerated **Flow Lenia** simulation in Rust (wgpu/Metal) with a PyTorch 
 ### Prerequisites
 
 - Rust (stable toolchain)
-- Python 3 with PyTorch (for training)
+- Python 3 with NumPy (for generating creatures)
+- ffmpeg (for video encoding)
 - A GPU with Metal support (macOS) or Vulkan (Linux/Windows)
+
+### Generate a Creature
+
+```bash
+python3 train/generate_kernel_json.py --name my_creature --grid-size 1024
+```
+
+This creates `seed/my_creature.json` (config + seed) and `kernels/my_creature_1024.bin` (FFT kernels).
 
 ### Run the Simulation
 
 ```bash
-cargo run --release
+# Generate a video for one creature
+cargo run --release -- --creature my_creature --seconds 60 --fps 60
+
+# Generate videos for ALL creatures in seed/
+cargo run --release -- --seconds 30 --fps 30
+
+# With audio synthesis
+cargo run --release -- --creature my_creature --with-sound
 ```
-
-This generates a 3-channel Gaussian seed and runs the Flow Lenia simulation on the GPU.
-
-### Load Trained Kernels
-
-```bash
-# Train first:
-python3 train/train_lenia.py --epochs 200
-
-# Then run with trained kernels:
-cargo run --release -- --load-kernels train/trained_kernels.bin
-```
-
-## Training
-
-The Python training script (`train/train_lenia.py`) uses **FlowLeniaTorch** — a PyTorch implementation of Flow Lenia with differentiable FFT convolution, Sobel gradients, and semi-Lagrangian advection. It trains the kernel FFT weights to move a glider seed toward targets at increasing distances.
-
-```bash
-python3 train/train_lenia.py --epochs 200 --lr 0.1
-```
-
-Optional flags:
-- `--save-png` — Save kernel visualizations as PNGs
-- `--grid-size N` — Grid size (default: 512)
-- `--num-steps N` — Simulation steps per epoch (default: 40)
-- `--output PATH` — Output path for trained kernels (default: `train/trained_kernels.bin`)
-
-## Seed Configuration
-
-The initial glider seed is defined in `seed/glider.json`. Both Python and Rust read from this file:
-
-```json
-{
-  "channels": [
-    { "sigma": 0.25, "offset_x": 0.0,   "offset_y": 0.0 },
-    { "sigma": 0.22, "offset_x": 0.04,  "offset_y": 0.0 },
-    { "sigma": 0.28, "offset_x": 0.0,   "offset_y": 0.04 }
-  ]
-}
-```
-
-Each channel is a 2D Gaussian with configurable sigma (size) and offset (asymmetry). Edit this file to change the glider's shape and size without modifying code.
-
-## Controls
-
-| Key | Action |
-|---|---|
-| **R** | Reset glider seed |
-| **Q / Escape** | Quit |
 
 ## CLI Flags
 
-| Flag | Description |
-|---|---|
-| `--load-kernels <file>` | Load trained kernel FFT weights from file |
+| Flag | Default | Description |
+|---|---|---|
+| `--creature <name>` | *(all)* | Creature name. Loads `seed/{name}.json` and `kernels/{name}_{size}.bin`. If omitted, generates videos for all creatures in `seed/`. |
+| `--seconds <N>` | `60` | Video duration in seconds |
+| `--fps <N>` | `60` | Video frame rate |
+| `--output <dir>` | `videos` | Output directory for MP4 files |
+| `--temp <N>` | `1.0` | Simulation temperature (diffusion affinity multiplier) |
+| `--with-sound` | `false` | Generate reactive audio and mux it into the video |
 
-## How Flow Lenia Works
+## Additional Binaries
+
+| Binary | Description |
+|---|---|
+| `ml-rs` | Main video generation (default) |
+| `ml-rs-profile` | Per-phase GPU timing breakdown |
+| `ml-rs-save-pngs` | Save simulation frames as PNGs |
+| `ml-rs-example` | CPU reference implementation |
+
+```bash
+# Profile GPU performance
+cargo run --release --bin ml-rs-profile -- --creature my_creature
+
+# Save PNG frames
+cargo run --release --bin ml-rs-save-pngs -- --creature my_creature
+```
+
+## Seed Configuration
+
+Each creature is defined by a JSON file in `seed/`. Example:
+
+```json
+{
+  "seed_size": 1024,
+  "num_channels": 3,
+  "num_kernels": 9,
+  "seed_channels": [
+    [/* 1024×1024 f64 values for channel 0 */],
+    [/* channel 1 */],
+    [/* channel 2 */]
+  ],
+  "c0": [0, 1, 2, 0, 1, 2, 0, 1, 2],
+  "c1": [0, 0, 0, 1, 1, 1, 2, 2, 2],
+  "growth_mu": [0.05, 0.07, 0.10, ...],
+  "growth_sigma": [0.03, 0.04, 0.05, ...],
+  "growth_weights": [0.5, 0.25, 0.25, ...]
+}
+```
+
+- **`c0[k]`** — input channel for kernel `k`
+- **`c1[k]`** — output channel for kernel `k`
+- **`growth_mu[k]`** — mean of the bump growth function for kernel `k`
+- **`growth_sigma[k]`** — standard deviation of the bump growth function
+- **`growth_weights[k]`** — weight in the per-channel weighted sum
+
+Use `train/generate_kernel_json.py` to create new creatures, or `train/convert_demo_to_creature.py` to convert PyTorch checkpoints.
+
+## How DiffusionLenia Works
 
 Each simulation step runs as a series of GPU compute shaders:
 
-1. **FFT Convolution** — Each kernel is convolved with its source channel via FFT
-2. **Growth** — A growth function `G(x) = 2*exp(-x²/(2σ²)) - 1` is applied (μ=0, σ=5)
-3. **Channel Aggregate** — Kernel outputs are summed per channel using a C0/C1 mapping
-4. **Sobel Gradient** — Spatial gradients of the growth field and total mass are computed
-5. **Flow Field** — Gradients are combined into a flow field with an alpha-blended mixing term
-6. **Semi-Lagrangian Advection** — Mass is advected along the flow field using bilinear interpolation
+1. **FFT Convolution** — Each kernel is convolved with its source channel via FFT (row FFT → column FFT → complex multiply → fused IFFT)
+2. **Growth** — Bump function `G(u) = 2·exp(-((u-μ)/σ)²/2) - 1` is applied per kernel, then weighted sum per output channel → affinity buffer
+3. **Diffusion (Pass 1)** — `aff_exp = exp(temp · affinity)`, compute `Z = 3×3` neighborhood sum of `aff_exp`
+4. **Diffusion (Pass 2)** — `new_state[p] = aff_exp[p] · Σ(neighbors state[n] / Z[n])`
+5. **Buffer Copy** — New state copied back to channel buffer
 
-This conserves mass — mass is moved around rather than created or destroyed.
+This conserves mass — mass is redistributed across the grid rather than created or destroyed.
+
+## Audio Synthesis
+
+When `--with-sound` is enabled, the simulation generates reactive audio:
+
+- Each of the 3 channels produces tonal sonar pings at distinct frequencies (100 Hz, 300 Hz, 750 Hz)
+- Pings fire when spatial variance changes (mass redistribution events)
+- Frequency sweeps, low-pass filter, and stereo delay create an alien/underwater soundscape
+- Audio is muxed into the final video via ffmpeg
 
 ## Project Structure
 
 ```
-cella-nova-rs/
-├── src/
-│   ├── main.rs              # Simulation entry point + rendering
-│   ├── lib.rs               # Crate root
-│   ├── gpu_flow_lenia.rs    # GPU compute pipeline (WGSL shaders)
-│   └── wfft.rs              # GPU FFT implementation
+cella-nova/
+├── ml-rs/
+│   ├── main.rs                  # Video generation entry point
+│   ├── lib.rs                   # Crate root
+│   ├── config.rs                # Config + kernel loader
+│   ├── wfft.rs                  # Shared wgpu context
+│   ├── audio.rs                 # Audio synthesis
+│   ├── profile.rs               # GPU profiling binary
+│   ├── save_pngs.rs             # PNG export binary
+│   ├── example.rs               # CPU reference implementation
+│   ├── orchestrator/
+│   │   ├── mod.rs               # GpuMaceLenia orchestrator
+│   │   ├── convolution.rs       # FFT convolution phase
+│   │   ├── growth.rs            # Growth + weighted sum phase
+│   │   ├── diffusion.rs         # Mass-conserving diffusion phase
+│   │   └── render.rs            # GPU render phase
+│   └── shaders/
+│       ├── compute_1024.wgsl    # WGSL shaders (1024×1024)
+│       └── compute_2048.wgsl    # WGSL shaders (2048×2048)
 ├── train/
-│   └── train_lenia.py       # PyTorch training script
-├── seed/
-│   └── glider.json          # Seed configuration
-├── images/                   # Documentation images
+│   ├── lenia_org.py             # PyTorch MCLenia base class
+│   ├── diff_lenia_org.py        # PyTorch DiffusionLenia
+│   ├── generate_kernel_json.py  # Creature generator
+│   ├── convert_demo_to_creature.py  # PyTorch checkpoint converter
+│   ├── compare_pngs.py          # Python vs Rust comparison
+│   └── save_frames_png.py       # Python PNG export
+├── seed/                        # 66 pre-generated creature configs
+├── kernels/                     # 66 pre-generated FFT kernel files
+├── videos/                      # Output directory
 └── Cargo.toml
 ```
 
 ## Credits
 
-- **Flow Lenia** — Mass-conserving variant of [Lenia](https://arxiv.org/abs/1812.05433) by Bert Chan
+- **Lenia** — [Bert Chan (2018)](https://arxiv.org/abs/1812.05433)
+- **DiffusionLenia** — Mass-conserving variant using affinity-based diffusion
 - **License:** See LICENSE file
