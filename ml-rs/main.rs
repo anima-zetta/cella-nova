@@ -175,7 +175,9 @@ fn main() {
     } else {
         let all = discover_creatures();
         if all.is_empty() {
-            eprintln!("No creatures found in seed/. Use --creature or run convert_demo_to_creature.py first.");
+            eprintln!(
+                "No creatures found in seed/. Use --creature or run generate_kernel_json.py first."
+            );
             std::process::exit(1);
         }
         println!(

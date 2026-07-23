@@ -103,7 +103,7 @@ Each creature is defined by a JSON file in `seed/`. Example:
 - **`growth_sigma[k]`** — standard deviation of the bump growth function
 - **`growth_weights[k]`** — weight in the per-channel weighted sum
 
-Use `train/generate_kernel_json.py` to create new creatures, or `train/convert_demo_to_creature.py` to convert PyTorch checkpoints.
+Use `train/generate_kernel_json.py` to create new creatures.
 
 ## How DiffusionLenia Works
 
@@ -152,7 +152,6 @@ cella-nova/
 │   ├── lenia_org.py             # PyTorch MCLenia base class
 │   ├── diff_lenia_org.py        # PyTorch DiffusionLenia
 │   ├── generate_kernel_json.py  # Creature generator
-│   ├── convert_demo_to_creature.py  # PyTorch checkpoint converter
 │   ├── compare_pngs.py          # Python vs Rust comparison
 │   └── save_frames_png.py       # Python PNG export
 ├── seed/                        # 66 pre-generated creature configs
